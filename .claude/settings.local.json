@@ -47,7 +47,11 @@
       "Bash(ls:*)",
       "Bash(pip3 show:*)",
       "Bash(pip3 install:*)",
-      "Bash(git rm:*)"
+      "Bash(git rm:*)",
+      "Bash(grep -r \"sessionStorage\\\\|localStorage\" public/js/*.js)",
+      "Bash(echo \"Syntax check completed with status code: $?\")",
+      "Bash(chmod +x /tmp/analyze_changes.sh)",
+      "Bash(/tmp/analyze_changes.sh)"
     ]
   }
 }

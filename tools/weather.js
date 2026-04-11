@@ -52,7 +52,7 @@ async function execute({ city, date }) {
   }
 
   try {
-    const url = `https://wttr.in/${encodeURIComponent(city)}?format=j1`;
+    const url = `https://wttr.in/${encodeURIComponent(city)}?format=j1&lang=zh`;
     const data = await fetchJSON(url);
 
     const current = data.current_condition?.[0];

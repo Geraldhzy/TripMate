@@ -1,6 +1,6 @@
 /**
  * itinerary.js — 行程信息面板渲染与交互
- * 两列布局：左栏基本条件 / 右栏详细行程
+ * 单列纵向布局：目的地标题 → 路线 → 基本信息 → 偏好/天气/进度 → 机票酒店 → 每日行程 → 预算
  */
 
 let itineraryState = {
@@ -27,11 +27,29 @@ const expandedDays = new Set();
 
 const PHASE_LABELS = [
   '', // 0 = 未开始
-  '确认需求',
+  '需求确认',
   '规划行程',
   '完善细节',
   '预算总结'
 ];
+
+// 天气英文→中文兜底翻译
+const WEATHER_ZH = {
+  'Clear': '晴', 'Sunny': '晴', 'Partly cloudy': '多云', 'Partly Cloudy': '多云',
+  'Cloudy': '多云', 'Overcast': '阴', 'Mist': '薄雾', 'Fog': '雾',
+  'Light rain': '小雨', 'Moderate rain': '中雨', 'Heavy rain': '大雨',
+  'Light drizzle': '毛毛雨', 'Patchy rain possible': '可能有阵雨',
+  'Patchy rain nearby': '附近有阵雨', 'Light rain shower': '阵雨',
+  'Moderate or heavy rain shower': '中到大阵雨',
+  'Thundery outbreaks possible': '可能有雷阵雨',
+  'Thunderstorm': '雷暴', 'Snow': '雪', 'Light snow': '小雪',
+  'Heavy snow': '大雪', 'Blizzard': '暴风雪',
+  'Haze': '霾', 'Hot': '高温', 'Cold': '寒冷',
+};
+function translateWeather(desc) {
+  if (!desc) return '';
+  return WEATHER_ZH[desc] || WEATHER_ZH[desc.trim()] || desc;
+}
 
 // 将内部7阶段映射到面板展示的4阶段
 function mapPhase(raw) {
@@ -105,7 +123,7 @@ function clearItinerary() {
 }
 
 // ============================================================
-// 渲染行程面板（两列布局）
+// 渲染行程面板（单列纵向布局）
 // ============================================================
 function renderItinerary() {
   const body = document.getElementById('itinerary-body');
@@ -117,42 +135,66 @@ function renderItinerary() {
                   s.people || s.budget || s.preferences.length > 0 || s.phase > 0;
   if (!hasData) return;
 
-  // 判断是否有右栏内容
-  const hasRightCol = (s.route && s.route.length > 0) ||
-                      (s.daysPlan && s.daysPlan.length > 0) ||
-                      s.budgetSummary;
+  let html = '';
 
-  // ── 左栏：基本条件 ──
-  let leftHtml = '';
-
+  // ── 1. 目的地大标题 ──
   if (s.destination) {
-    leftHtml += buildRow('📍', '目的地', escItinHtml(s.destination));
+    html += `<div class="itin-dest-title">${escItinHtml(s.destination)}</div>`;
   }
-  if (s.departCity) {
-    leftHtml += buildRow('🛫', '出发', escItinHtml(s.departCity), 'departCity');
+
+  // ── 2. 路线（紧跟标题下方） ──
+  if (s.route && s.route.length > 0) {
+    const stops = s.route.map((city, i) => {
+      const isLast = i === s.route.length - 1;
+      return `<span class="route-stop">${escItinHtml(city)}</span>${isLast ? '' : '<span class="route-arrow">→</span>'}`;
+    }).join('');
+    html += `<div class="itin-route-bar">${stops}</div>`;
   }
+
+  // ── 3. 基本信息紧凑 grid ──
+  const infoItems = [];
   if (s.dates || s.days) {
     const dateStr = s.dates ? escItinHtml(s.dates) : '';
-    const daysSuffix = s.days ? (dateStr ? `（${s.days}天）` : `${s.days}天`) : '';
-    leftHtml += buildRow('📅', '日期', dateStr + daysSuffix, 'dates');
+    const daysSuffix = s.days ? (dateStr ? `(${s.days}天)` : `${s.days}天`) : '';
+    infoItems.push({ icon: '📅', value: dateStr + daysSuffix, field: 'dates' });
   }
   if (s.people) {
-    leftHtml += buildRow('👥', '人数', `${s.people}人`, 'people');
+    infoItems.push({ icon: '👥', value: `${s.people}人`, field: 'people' });
   }
   if (s.budget) {
-    leftHtml += buildRow('💰', '预算', escItinHtml(s.budget), 'budget');
+    infoItems.push({ icon: '💰', value: escItinHtml(s.budget), field: 'budget' });
   }
-  if (s.preferences.length > 0) {
-    const tagsHtml = s.preferences.map(p => `<span class="itin-tag">${escItinHtml(p)}</span>`).join('');
-    leftHtml += buildRow('🏷️', '偏好', tagsHtml);
-  }
-  if (s.weather) {
-    const w = s.weather;
-    const desc = w.description ? `，${escItinHtml(w.description)}` : '';
-    leftHtml += buildRow('🌤️', '天气', `${escItinHtml(w.city)} ${w.temp_c}°C${desc}`);
+  if (s.departCity) {
+    infoItems.push({ icon: '🛫', value: escItinHtml(s.departCity), field: 'departCity' });
   }
 
-  // 阶段进度
+  if (infoItems.length > 0) {
+    html += '<div class="itin-info-grid">';
+    for (const item of infoItems) {
+      html += `<div class="itin-info-item" data-field="${item.field}">
+        <span class="itin-icon">${item.icon}</span>
+        <span class="itin-info-text">${item.value}</span>
+        <button class="itin-edit-btn" data-field="${item.field}" title="修改">✏️</button>
+      </div>`;
+    }
+    html += '</div>';
+  }
+
+  // ── 4. 偏好标签 ──
+  if (s.preferences.length > 0) {
+    const tagsHtml = s.preferences.map(p => `<span class="itin-tag">${escItinHtml(p)}</span>`).join('');
+    html += `<div class="itin-tags-bar">🏷️ ${tagsHtml}</div>`;
+  }
+
+  // ── 5. 天气（中文翻译） ──
+  if (s.weather) {
+    const w = s.weather;
+    const desc = w.description ? translateWeather(w.description) : '';
+    const descHtml = desc ? `，${escItinHtml(desc)}` : '';
+    html += `<div class="itin-weather-bar">🌤️ ${escItinHtml(w.city)} ${w.temp_c}°C${descHtml}</div>`;
+  }
+
+  // ── 6. 阶段进度 ──
   if (s.phase > 0) {
     let progressHtml = '<div class="itin-progress">';
     for (let i = 1; i <= 4; i++) {
@@ -161,21 +203,17 @@ function renderItinerary() {
     }
     progressHtml += '</div>';
     const phaseText = `${escItinHtml(s.phaseLabel)}（${s.phase}/4）`;
-    leftHtml += `<div class="itin-row">
-      <span class="itin-icon">📊</span>
-      <span class="itin-label">进度</span>
-      <div class="itin-value">
-        <div style="margin-bottom:6px">${phaseText}</div>
-        ${progressHtml}
-      </div>
+    html += `<div class="itin-progress-bar">
+      <span class="itin-progress-text">📊 ${phaseText}</span>
+      ${progressHtml}
     </div>`;
   }
 
-  // 机票
+  // ── 7. 机票 ──
   if (s.flights.length > 0) {
-    leftHtml += '<div class="itin-section-title">✈️ 机票</div>';
+    html += '<div class="itin-section-title">✈️ 机票</div>';
     s.flights.forEach(f => {
-      leftHtml += `<div class="itin-booking-card">
+      html += `<div class="itin-booking-card">
         <div class="itin-booking-title">${escItinHtml(f.route || '')}</div>
         <div class="itin-booking-detail">
           ${f.airline ? escItinHtml(f.airline) + ' · ' : ''}${f.price ? escItinHtml(f.price) : ''}${f.time ? ' · ' + escItinHtml(f.time) : ''}
@@ -184,11 +222,11 @@ function renderItinerary() {
     });
   }
 
-  // 酒店
+  // ── 8. 酒店 ──
   if (s.hotels.length > 0) {
-    leftHtml += '<div class="itin-section-title">🏨 酒店</div>';
+    html += '<div class="itin-section-title">🏨 酒店</div>';
     s.hotels.forEach(h => {
-      leftHtml += `<div class="itin-booking-card">
+      html += `<div class="itin-booking-card">
         <div class="itin-booking-title">${escItinHtml(h.name || '')}</div>
         <div class="itin-booking-detail">
           ${h.nights ? h.nights + '晚 · ' : ''}${h.price ? escItinHtml(h.price) : ''}
@@ -197,29 +235,18 @@ function renderItinerary() {
     });
   }
 
-  // ── 右栏：详细行程 ──
-  let rightHtml = '';
-
-  if (s.route && s.route.length > 0) {
-    rightHtml += renderRoute(s.route);
-  }
+  // ── 9. 每日行程 ──
   if (s.daysPlan && s.daysPlan.length > 0) {
-    rightHtml += renderDaysPlan(s.daysPlan);
-  }
-  if (s.budgetSummary) {
-    rightHtml += renderBudgetSummary(s.budgetSummary);
+    html += renderDaysPlan(s.daysPlan);
   }
 
-  // ── 组装 ──
-  if (hasRightCol) {
-    body.innerHTML = `<div class="itin-two-col">
-      <div class="itin-col-left">${leftHtml}</div>
-      <div class="itin-col-right">${rightHtml}</div>
-    </div>`;
-  } else {
-    // 无右栏内容时用单列
-    body.innerHTML = leftHtml;
+  // ── 10. 预算摘要 ──
+  if (s.budgetSummary) {
+    html += renderBudgetSummary(s.budgetSummary);
   }
+
+  // ── 组装到 DOM ──
+  body.innerHTML = html;
 
   // 绑定编辑按钮事件
   body.querySelectorAll('.itin-edit-btn').forEach(btn => {
@@ -231,26 +258,11 @@ function renderItinerary() {
 }
 
 // ============================================================
-// 构建单行
-// ============================================================
-function buildRow(icon, label, valueHtml, editableField) {
-  const editBtn = editableField
-    ? `<button class="itin-edit-btn" data-field="${editableField}" title="修改">✏️</button>`
-    : '';
-  return `<div class="itin-row">
-    <span class="itin-icon">${icon}</span>
-    <span class="itin-label">${label}</span>
-    <span class="itin-value" data-field="${editableField || ''}">${valueHtml}</span>
-    ${editBtn}
-  </div>`;
-}
-
-// ============================================================
 // Inline 编辑
 // ============================================================
 function startInlineEdit(btn) {
-  const row = btn.closest('.itin-row');
-  const valueEl = row.querySelector('.itin-value');
+  const container = btn.closest('.itin-info-item');
+  const valueEl = container.querySelector('.itin-info-text');
   const field = btn.dataset.field;
   const currentText = valueEl.textContent.trim();
 
@@ -340,22 +352,6 @@ function updateFromTripBook(data) {
 }
 
 // ============================================================
-// 渲染路线可视化
-// ============================================================
-function renderRoute(route) {
-  if (!route || route.length === 0) return '';
-  const stops = route.map((city, i) => {
-    const isLast = i === route.length - 1;
-    return `<span class="route-stop">${escItinHtml(city)}</span>${isLast ? '' : '<span class="route-arrow">→</span>'}`;
-  }).join('');
-  return `<div class="itin-row">
-    <span class="itin-icon">🗺️</span>
-    <span class="itin-label">路线</span>
-    <span class="itin-value"><div class="itin-route">${stops}</div></span>
-  </div>`;
-}
-
-// ============================================================
 // 折叠/展开每日行程
 // ============================================================
 function toggleDay(dayNum) {
@@ -369,6 +365,30 @@ function toggleDay(dayNum) {
   if (card) {
     card.classList.toggle('expanded', expandedDays.has(dayNum));
   }
+  // 更新"全部展开/收起"按钮文案
+  updateToggleAllText();
+}
+
+function toggleAllDays() {
+  const daysPlan = itineraryState.daysPlan;
+  const hasSegments = daysPlan.filter(d => d.segments && d.segments.length > 0);
+  const allExpanded = hasSegments.length > 0 && hasSegments.every(d => expandedDays.has(d.day));
+
+  if (allExpanded) {
+    expandedDays.clear();
+  } else {
+    hasSegments.forEach(d => expandedDays.add(d.day));
+  }
+  renderItinerary();
+}
+
+function updateToggleAllText() {
+  const btn = document.getElementById('toggle-all-btn');
+  if (!btn) return;
+  const daysPlan = itineraryState.daysPlan;
+  const hasSegments = daysPlan.filter(d => d.segments && d.segments.length > 0);
+  const allExpanded = hasSegments.length > 0 && hasSegments.every(d => expandedDays.has(d.day));
+  btn.textContent = allExpanded ? '全部收起' : '全部展开';
 }
 
 // ============================================================
@@ -376,37 +396,43 @@ function toggleDay(dayNum) {
 // ============================================================
 function renderDaysPlan(daysPlan) {
   if (!daysPlan || daysPlan.length === 0) return '';
-  let html = '<div class="itin-section-title">📋 每日行程</div>';
+
+  // 判断是否有任何 day 有 segments
+  const anySegments = daysPlan.some(d => d.segments && d.segments.length > 0);
+  const hasSegments = daysPlan.filter(d => d.segments && d.segments.length > 0);
+  const allExpanded = hasSegments.length > 0 && hasSegments.every(d => expandedDays.has(d.day));
+  const toggleText = allExpanded ? '全部收起' : '全部展开';
+
+  let html = '<div class="itin-section-header">';
+  html += '<span class="itin-section-title" style="margin:0">📋 每日行程</span>';
+  if (anySegments) {
+    html += `<button class="itin-toggle-all" id="toggle-all-btn" onclick="toggleAllDays()">${toggleText}</button>`;
+  }
+  html += '</div>';
 
   for (const d of daysPlan) {
     const isExpanded = expandedDays.has(d.day);
     const expandedClass = isExpanded ? ' expanded' : '';
     const dateStr = d.date ? `<span class="day-date">${escItinHtml(d.date)}</span>` : '';
     const cityStr = d.city ? `<span class="day-city">${escItinHtml(d.city)}</span>` : '';
-    const titleStr = d.title ? `<span class="day-title">${escItinHtml(d.title)}</span>` : '';
-    const hasSegments = d.segments && d.segments.length > 0;
-    const segCount = hasSegments ? d.segments.length : 0;
+    const hasSegs = d.segments && d.segments.length > 0;
 
-    html += `<div class="itin-day-card${expandedClass}" id="day-card-${d.day}">
-      <div class="itin-day-header" onclick="toggleDay(${d.day})">
+    html += `<div class="itin-day-card${expandedClass}${hasSegs ? ' has-segments' : ''}" id="day-card-${d.day}">
+      <div class="itin-day-header" ${hasSegs ? `onclick="toggleDay(${d.day})"` : ''}>
         <span class="day-num">Day ${d.day}</span>
         ${dateStr}${cityStr}
-        ${titleStr}
-        <span class="day-toggle">▶</span>
+        ${hasSegs ? '<span class="day-toggle">▶</span>' : ''}
       </div>`;
 
-    if (hasSegments) {
-      // 详细时间线（折叠区域）
+    // 副标题（title 不截断，显示在 header 下方）
+    if (d.title) {
+      html += `<div class="itin-day-subtitle">${escItinHtml(d.title)}</div>`;
+    }
+
+    if (hasSegs) {
       html += `<div class="itin-day-detail">`;
       html += renderTimeline(d.segments);
       html += `</div>`;
-    } else {
-      // 无 segments 时显示摘要
-      const bodyText = d.title ? escItinHtml(d.title) : '';
-      const segInfo = segCount > 0 ? `<span class="day-seg-count">${segCount}项活动</span>` : '';
-      if (bodyText || segInfo) {
-        html += `<div class="itin-day-body">${bodyText}${segInfo ? ' · ' + segInfo : ''}</div>`;
-      }
     }
 
     html += `</div>`;

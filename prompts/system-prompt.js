@@ -126,7 +126,7 @@ ${weatherLines}`);
     parts.push('\n---\n# 活动知识库：潜水\n以下为参考信息，价格和潜店信息需通过工具验证。\n' + divingKB);
   }
 
-  // ── 注入缓存的目的地知识库（AI 通过 cache_destination_knowledge 保存的）──
+  // ── 注入缓存的目的地知识库（AI 自动生成，存储于 prompts/knowledge/dest-*.js）──
   const cachedDests = getAllCachedDests();
   if (cachedDests.length > 0) {
     // 避免与硬编码知识库重复：跳过已有专属知识库的目的地
