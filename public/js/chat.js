@@ -648,12 +648,21 @@ function saveTripSnapshot() {
   if (chatHistory.length === 0) return;
   const trips = loadTrips();
   const now = Date.now();
+  
+  // Capture latest TripBook state
+  let tripBookSnapshot = {};
+  try {
+    const stored = sessionStorage.getItem('tp_tripbook');
+    if (stored) tripBookSnapshot = JSON.parse(stored);
+  } catch {}
+  
   if (currentTripId) {
     const idx = trips.findIndex(t => t.id === currentTripId);
     if (idx !== -1) {
       trips[idx].messages = [...chatHistory];
       trips[idx].updatedAt = now;
       trips[idx].title = generateTripTitle();
+      trips[idx].tripBookSnapshot = tripBookSnapshot;  // ← ADD THIS LINE
       saveTrips(trips);
       return;
     }
@@ -664,7 +673,8 @@ function saveTripSnapshot() {
     title: generateTripTitle(),
     createdAt: now,
     updatedAt: now,
-    messages: [...chatHistory]
+    messages: [...chatHistory],
+    tripBookSnapshot: tripBookSnapshot  // ← ADD THIS LINE
   };
   currentTripId = newTrip.id;
   trips.unshift(newTrip);
@@ -690,6 +700,20 @@ function loadTripById(id) {
   currentTripId = trip.id;
   chatHistory = [...trip.messages];
   restoreChatUI();
+  
+  // Restore TripBook snapshot if available
+  if (trip.tripBookSnapshot && Object.keys(trip.tripBookSnapshot).length > 0) {
+    try {
+      sessionStorage.setItem('tp_tripbook', JSON.stringify(trip.tripBookSnapshot));
+      // Update itinerary panel from restored snapshot
+      if (typeof updateFromTripBook === 'function') {
+        updateFromTripBook(trip.tripBookSnapshot);
+      }
+    } catch (e) {
+      console.warn('Failed to restore TripBook snapshot:', e);
+    }
+  }
+  
   toggleHistory();
   renderHistoryList();
 }
