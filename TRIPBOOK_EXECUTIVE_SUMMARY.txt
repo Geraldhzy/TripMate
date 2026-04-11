@@ -1,0 +1,417 @@
+╔════════════════════════════════════════════════════════════════════════════════════╗
+║                 TRIPBOOK ARCHITECTURE — EXECUTIVE SUMMARY                         ║
+║                                                                                    ║
+║ Understanding how TripBook manages trip planning state across AI conversations    ║
+╚════════════════════════════════════════════════════════════════════════════════════╝
+
+📚 WHAT IS TRIPBOOK?
+════════════════════════════════════════════════════════════════════════════════════
+
+TripBook is the system's "single source of truth" for trip planning state. It's a 
+4-layer data model that tracks:
+
+  • Layer 1: Static Knowledge         — Reusable destination/activity info
+  • Layer 2: Dynamic Data             — Real-time info (weather, rates, quotes)
+  • Layer 3: User Constraints         — What the user wants (confirmed ✅)
+  • Layer 4: Itinerary               — The trip plan being built incrementally
+
+Location: /models/trip-book.js
+
+Think of it as: A living document that grows during the conversation, preventing
+the AI from re-asking confirmed questions and ensuring the right panel UI updates
+in real-time.
+
+
+🔄 THE CORE WORKFLOW
+════════════════════════════════════════════════════════════════════════════════════
+
+1. USER:  "I want to go to Japan in May, 2万 per person, 2 people"
+                                    ↓
+2. AI:    Receives system prompt that includes current TripBook state
+          (initially mostly empty)
+                                    ↓
+3. AI:    Calls update_trip_info({
+            constraints: { destination, dates, people, budget, ... },
+            phase: 1,
+            itinerary: { route: [...], days: [...] }
+          })
+                                    ↓
+4. TOOL:  Validates input, returns structured response:
+          { success: true, updates: {...}, message: "..." }
+          (Note: Tool does NOT modify TripBook — this is key!)
+                                    ↓
+5. SERVER: Reads tool response, applies updates to TripBook:
+           tripBook.updateConstraints(constraints)
+           tripBook.updatePhase(phase)
+           tripBook.updateItinerary(itinerary)
+                                    ↓
+6. SERVER: Sends updated panel data to frontend:
+           tripBook.toPanelData() → {"destination": "Japan", "route": [...], ...}
+                                    ↓
+7. FRONTEND: Right panel shows skeleton immediately (day 1, day 2, etc.)
+                                    ↓
+8. NEXT TURN: AI gets new system prompt that now INCLUDES:
+              "# 行程参考书
+               ## 用户已确认信息（勿重复询问）
+               - 目的地：日本 ✅
+               - 日期：2026-05-01 ~ 2026-05-07 ✅
+               - 人数：2人 ✅
+               - 预算：¥20,000/人 ✅"
+              
+              AI sees ✅ markers and knows NOT to re-ask these questions.
+              Conversation flows forward naturally.
+
+
+🎯 THREE KEY PROBLEMS IT SOLVES
+════════════════════════════════════════════════════════════════════════════════════
+
+Problem 1: Unreliable Constraint Extraction
+─────────────────────────────────────────────────────────────────────────────────
+  Before: Regex parsing of AI responses to extract user info (fragile!)
+  After:  AI calls update_trip_info tool with structured JSON → rock solid
+  
+Problem 2: AI Re-asking Confirmed Information
+─────────────────────────────────────────────────────────────────────────────────
+  Before: AI asks "So you want to go to Japan?" multiple times in conversation
+  After:  System prompt includes "## 用户已确认信息（勿重复询问）" with ✅ marks
+          AI reads this and knows NOT to re-ask
+  
+Problem 3: Frontend Panel Out of Sync
+─────────────────────────────────────────────────────────────────────────────────
+  Before: Panel only updates after entire trip plan is complete (boring UX)
+  After:  Panel updates in real-time as AI builds skeleton → immediate feedback
+
+
+📊 LAYERS EXPLAINED
+════════════════════════════════════════════════════════════════════════════════════
+
+LAYER 1: Static Knowledge (knowledgeRefs, activityRefs)
+────────────────────────────────────────────────────────────
+  Purpose: Reuse between trips
+  Example: ["Japan", "Thailand"] → destination knowledge bases
+           ["Diving", "Food"] → activity knowledge bases
+  
+  Note: Actual knowledge stored separately in prompts/knowledge/ directory.
+        TripBook just keeps KEYS for reference.
+
+
+LAYER 2: Dynamic Data (weather, exchangeRates, flightQuotes, hotelQuotes, webSearches)
+─────────────────────────────────────────────────────────────────────────────────
+  Purpose: Cache real-time data to avoid repeated API calls
+  Examples:
+    • weather: { "tokyo": { city, current, forecast, _meta } } with 3hr TTL
+    • exchangeRates: { "JPY_CNY": { from, to, rate, _meta } } with 4hr TTL
+    • flightQuotes: [{ id: "f1", route, airline, price_cny, status, ... }]
+    • hotelQuotes: [{ id: "h1", name, city, price, status, ... }]
+    • webSearches: [{ query, summary, fetched_at }]
+  
+  Status flow: "quoted" → (user selects) → "selected" → (books) → "booked"
+  
+  Key concept: Each quote gets auto-generated ID (f1, f2, h1, h2, etc.)
+
+
+LAYER 3: User Constraints (destination, departCity, dates, people, budget, preferences)
+──────────────────────────────────────────────────────────────────────────────────────
+  Purpose: Track what the user wants + confirmation status
+  Example structure:
+    {
+      destination: {
+        value: "Japan",           // What user said
+        cities: ["Tokyo", "Kyoto"],  // Parsed sub-cities
+        confirmed: true,          // User said yes, lock it in
+        confirmed_at: 1681234567, // Timestamp (auto-set)
+        _reason: "User said..."   // (Optional internal field, deleted after use)
+      }
+      // ... similar structure for departCity, dates, people, budget, preferences
+    }
+  
+  Special field: _history tracks changes over time with reasons
+  
+  Key rule: ✅ confirmed: true → DO NOT RE-ASK IN SYSTEM PROMPT
+
+
+LAYER 4: Itinerary (phase, route, days, budgetSummary, reminders)
+────────────────────────────────────────────────────────────────
+  Purpose: The actual trip plan being built
+  
+  phase: 0=not started, 1-7=internal phases (maps to 1-4 in UI)
+    Phase 1: Lock constraints
+    Phase 2: Flight booking
+    Phase 3: Build framework
+    Phase 4: Key bookings
+    Phase 5: Day details
+    Phase 6: Budget summary
+    Phase 7: Export summary
+  
+  route: ["Tokyo", "Kyoto", "Osaka"] — visit order
+  
+  days: [
+    {
+      day: 1,
+      date: "2026-05-01",
+      city: "Tokyo",
+      title: "Arrival",
+      segments: [          // Activities within the day
+        {
+          time: "14:00",   // Activity start time
+          title: "Land at Haneda",
+          location: "Haneda",
+          duration: "2 hours",
+          transport: "Train",
+          transportTime: "30 min",
+          type: "transportation",  // transportation | dining | activity | etc
+          notes: "Buy Suica card"
+        },
+        ...
+      ]
+    },
+    ...
+  ]
+  
+  budgetSummary: Breakdown of costs (flights, hotels, meals, activities, etc.)
+    • Each category: { label, amount_cny, count/nights }
+    • total_cny: Sum of all categories
+    • budget_cny: Total budget from constraints
+    • remaining_cny: budget_cny - total_cny
+  
+  reminders: ["Register Visit Japan Web 3 days before", ...]
+    Used to generate pre-trip checklist
+
+
+🛠️ THE update_trip_info TOOL
+════════════════════════════════════════════════════════════════════════════════════
+
+Location: /tools/update-trip-info.js
+
+What it does:
+  • Accept structured data from AI
+  • Validate constraints, phase, itinerary
+  • Return structured response (for server to apply)
+
+What it does NOT do:
+  • Modify TripBook directly (no side effects)
+  • Execute database operations
+  • Call other tools
+
+Parameter structure:
+  {
+    constraints: {
+      destination: { value, cities, confirmed, ... },
+      departCity: { value, airports, confirmed, ... },
+      dates: { start, end, days, flexible, notes, confirmed, ... },
+      people: { count, details, confirmed, ... },
+      budget: { value, per_person, currency, scope, notes, confirmed, ... },
+      preferences: { tags, notes, confirmed, ... },
+      specialRequests: [{ type, value, confirmed }, ...]
+    },
+    phase: 1,  // Integer 1-7 (validates in execute())
+    itinerary: {
+      route: ["Tokyo", "Kyoto"],
+      days: [{ day, date, city, title, segments }, ...],
+      budgetSummary: { flights, hotels, ..., total_cny, remaining_cny },
+      reminders: [...]
+    }
+  }
+
+Return format:
+  {
+    success: true,
+    updates: { constraints, phase, itinerary },  // Echo back what was sent
+    message: "已记录目的地、日期、人数、预算；确认需求（1/4）；已更新路线、每日行程"
+  }
+
+Key insight: Response is structured JSON that SERVER reads and applies, not AI
+
+
+🧠 HOW SYSTEM PROMPT INTEGRATION WORKS
+════════════════════════════════════════════════════════════════════════════════════
+
+Location: /prompts/system-prompt.js
+
+Function: buildSystemPrompt(conversationText, knownRates, knownWeather, tripBook = null)
+
+Output sections (in order):
+  1. Current time (UTC+8 with weekday)
+  2. Holiday calendar
+  3. Core role definition (AI travel planner)
+  4. Progressive methodology
+  5. Tool use strategy (8 tools listed with calling conditions)
+  6. Source attribution rules
+  7. Destination knowledge bases (dynamic)
+  8. TripBook section (if tripBook instance provided) ← KEY!
+
+TripBook section includes (via tripBook.toSystemPromptSection()):
+  • "# 行程参考书"
+  • "## 已缓存动态数据" (cached weather, rates, searches)
+  • "## 用户已确认信息（勿重复询问）" (confirmed constraints with ✅)
+  • "## 待确认信息" (pending constraints with ❓)
+  • "## 当前行程进度" (phase, route, selected bookings, budget usage)
+
+Critical instruction in prompt:
+  "⚠️ 严禁重复询问：行程参考书中「已确认信息」和「已缓存动态数据」里记录的
+   所有内容，绝对不要再次向用户确认或追问。直接使用已记录的值进行规划。"
+
+Translation: DO NOT RE-ASK CONFIRMED INFO — this prevents redundant questions
+
+
+📋 KEY METHODS TO KNOW
+════════════════════════════════════════════════════════════════════════════════════
+
+WRITING (from AI via update_trip_info tool → server applies):
+  updateConstraints(delta)  — Merge user constraint changes
+  updatePhase(num)          — Set planning phase
+  updateItinerary(delta)    — Merge itinerary updates (route, days, etc.)
+  
+  Also called by server for other tools:
+  setWeather(cityKey, data)
+  setExchangeRate(key, data)
+  addFlightQuote(quote) → returns quoteId
+  addHotelQuote(quote) → returns quoteId
+  updateQuoteStatus(quoteId, status)
+
+
+READING (for system prompt):
+  toSystemPromptSection()   — Markdown for system prompt injection
+  buildConstraintsPromptSection()  — Only confirmed/pending constraints
+  buildItineraryPromptSection()    — Phase, route, selected bookings
+  buildDynamicDataPromptSection()  — Cached weather, rates, searches
+
+
+READING (for frontend):
+  toPanelData()  — Flat object for right panel:
+    { destination, departCity, dates, days, people, budget, preferences,
+      phase, phaseLabel, route, flights[], hotels[], weather, weatherList,
+      budgetSummary, daysPlan[] }
+
+
+PERSISTENCE:
+  toJSON()              — Serialize for database
+  fromJSON(json)        — Deserialize from database
+
+
+🎨 INCREMENTAL UPDATE PATTERN
+════════════════════════════════════════════════════════════════════════════════════
+
+CRITICAL: Only pass fields that changed (deltas), not entire objects!
+
+✅ CORRECT:
+  {
+    constraints: {
+      budget: { value: "30000", per_person: true, confirmed: true }  // Only budget changed
+    }
+  }
+
+❌ WRONG:
+  {
+    constraints: {
+      destination: { ... },
+      departCity: { ... },
+      dates: { ... },
+      people: { ... },
+      budget: { ... },  // Entire constraints object (wasteful)
+      preferences: { ... }
+    }
+  }
+
+Why? The updateConstraints() method uses shallow merge:
+  this.constraints[field] = oldVal ? { ...oldVal, ...newVal } : newVal;
+  
+  This preserves any unmentioned subfields while applying new values.
+
+
+🔐 CRITICAL CONSTRAINT: DO NOT RE-ASK
+════════════════════════════════════════════════════════════════════════════════════
+
+Once a constraint is marked ✅ confirmed: true, the system prompt section
+makes it IMPOSSIBLE for AI to forget:
+
+  ## 用户已确认信息（勿重复询问）
+  - 目的地：日本（东京·京都·大阪） ✅
+  - 出发城市：北京（可用机场：PEK/PKX） ✅
+  - 日期：2026-05-01 ~ 2026-05-07（7天） ✅
+  - 人数：2人 ✅
+  - 预算：2万 CNY（人均，含机票住宿） ✅
+  - 偏好：美食、文化 ✅
+
+This is the KEY to preventing redundant questions and keeping conversations
+focused on forward progress, not backtracking.
+
+
+📈 REAL-TIME FRONTEND UPDATES
+════════════════════════════════════════════════════════════════════════════════════
+
+When server applies TripBook updates:
+
+  1. tripBook state changes
+  2. Server calls panelData = tripBook.toPanelData()
+  3. Server sends via SSE/WebSocket: { panelData, message, ... }
+  4. Frontend receives + renders right panel immediately
+  5. User sees day skeleton, phases, selected flights/hotels appear in real-time
+  6. No full-page refresh needed
+
+This creates a smooth, responsive UX where the right panel "grows" as the
+conversation progresses.
+
+
+🎯 DESIGN PRINCIPLES
+════════════════════════════════════════════════════════════════════════════════════
+
+1. Incremental State Building
+   → Day-by-day skeleton created early, details filled in progressively
+   → Front-end shows content from first message, not after full planning
+
+2. Tool as Data Interface (Not Side-effect-Bearing)
+   → update_trip_info validates + returns structured data
+   → Server reads response and applies to TripBook
+   → Keeps concerns separated
+
+3. Temporal Locality (Cache + TTL)
+   → Weather cached 3 hours, exchange rates 4 hours
+   → System prompt reminds AI not to re-fetch
+   → Reduces API calls, speeds up planning
+
+4. Confirmation Tracking
+   → Each constraint has confirmed: true/false + confirmed_at timestamp
+   → History tracks what changed + when
+   → AI can reference confirmed ✅ data without fear of outdated info
+
+5. Progressive Disclosure
+   → System prompt grows as planning progresses
+   → Early turns: only basic confirmed info
+   → Later turns: includes selected flights, budget breakdowns, etc.
+   → Keeps prompt size reasonable
+
+
+📁 FILES TO KNOW
+════════════════════════════════════════════════════════════════════════════════════
+
+File                              Purpose
+────────────────────────────────────────────────────────────────────────────────
+/models/trip-book.js              TripBook class (4 layers, methods)
+/tools/update-trip-info.js        AI tool for updating TripBook
+/prompts/system-prompt.js         System prompt builder (includes TripBook)
+/tools/index.js                   Tool registry
+/server.js                        Reads tool responses, applies to TripBook
+
+
+🚀 QUICK START
+════════════════════════════════════════════════════════════════════════════════════
+
+1. AI receives user message + system prompt (which includes current TripBook)
+2. AI calls update_trip_info with { constraints, phase, itinerary }
+3. Tool validates + returns { success, updates, message }
+4. Server calls:
+   tripBook.updateConstraints(updates.constraints)
+   tripBook.updatePhase(updates.phase)
+   tripBook.updateItinerary(updates.itinerary)
+5. Server sends tripBook.toPanelData() to frontend
+6. Frontend right panel updates
+7. Next turn: AI's prompt includes new TripBook context with ✅ marks
+8. Rinse and repeat until trip planning complete
+
+
+For detailed examples and field structures, see:
+  • TRIPBOOK_ARCHITECTURE.md (comprehensive)
+  • TRIPBOOK_QUICK_REFERENCE.md (field-by-field reference)
+  • TRIPBOOK_FLOW_DIAGRAM.txt (visual walkthrough)
+

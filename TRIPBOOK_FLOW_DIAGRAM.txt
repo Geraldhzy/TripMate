@@ -1,0 +1,252 @@
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                     TRIPBOOK ARCHITECTURE & DATA FLOW                               │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│ 1. USER SENDS MESSAGE                                                            │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│ "我想5月去日本，东京京都大阪，人均2万元"                                          │
+└──────────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│ 2. SERVER BUILDS SYSTEM PROMPT                                                   │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│ buildSystemPrompt(text, rates, weather, tripBook)                                │
+│   ├─ Current time (2026-04-12 23:15)                                             │
+│   ├─ Holiday calendar (5/1五一，10/1国庆)                                         │
+│   ├─ Core role definition (AI travel planner rules)                              │
+│   ├─ Tool usage strategy (update_trip_info calling conditions)                   │
+│   ├─ Cached destinations (Japan knowledge if exists)                             │
+│   └─ TripBook section ← KEY: buildConstraintsPromptSection()                     │
+│       └─ Shows ONLY confirmed constraints + pending ones                         │
+└──────────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│ 3. AI RECEIVES PROMPT + CONVERSATION                                             │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│ System Prompt (8 KB) + History + Tools                                           │
+│                                                                                   │
+│ AI thinks: "User mentioned Japan (destination), May dates, 2万/person (budget)   │
+│ I should call update_trip_info to lock these constraints + create day skeleton"  │
+└──────────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│ 4. AI CALLS update_trip_info TOOL                                                │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│ {                                                                                 │
+│   constraints: {                                                                 │
+│     destination: { value: "日本", cities: ["东京","京都","大阪"], confirmed: true},
+│     dates: { start: "2026-05-01", end: "2026-05-07", days: 7, confirmed: true }, │
+│     people: { count: 2, confirmed: true },                                       │
+│     budget: { value: "2万", per_person: true, currency: "CNY", confirmed: true } │
+│   },                                                                              │
+│   phase: 1,                                                                      │
+│   itinerary: {                                                                   │
+│     route: ["东京", "京都", "大阪"],                                              │
+│     days: [                                                                      │
+│       { day: 1, date: "2026-05-01", city: "东京", title: "抵达", segments: [] },  │
+│       { day: 2, date: "2026-05-02", city: "东京", title: "游览", segments: [] },  │
+│       ...                                                                        │
+│     ]                                                                            │
+│   }                                                                              │
+│ }                                                                                 │
+└──────────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│ 5. TOOL RETURNS STRUCTURED RESPONSE                                              │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│ {                                                                                 │
+│   success: true,                                                                 │
+│   updates: { constraints: {...}, phase: 1, itinerary: {...} },                   │
+│   message: "已记录目的地、日期、人数、预算；确认需求（1/4）；已更新路线、每日行程"│
+│ }                                                                                 │
+│                                                                                   │
+│ NOTE: Tool does NOT modify TripBook directly (side-effect free)                  │
+│       Server.js reads this response and applies updates                          │
+└──────────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│ 6. SERVER APPLIES UPDATES TO TRIPBOOK                                            │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│ if (updates.constraints) tripBook.updateConstraints(updates.constraints);        │
+│   └─ Merges into constraints, timestamps confirmed_at, tracks history            │
+│                                                                                   │
+│ if (updates.phase !== undefined) tripBook.updatePhase(updates.phase);            │
+│   └─ Sets phase: 1, phaseLabel: "锁定约束"                                       │
+│                                                                                   │
+│ if (updates.itinerary) tripBook.updateItinerary(updates.itinerary);              │
+│   └─ Merges route + days, preserves existing segments if new ones empty          │
+└──────────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│ 7. FRONTEND PANEL UPDATES                                                        │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│ Server sends: SSE/WebSocket with tripBook.toPanelData()                          │
+│   ├─ destination: "日本（东京·京都·大阪）"                                        │
+│   ├─ dates: "2026-05-01 ~ 2026-05-07"                                            │
+│   ├─ days: 7                                                                     │
+│   ├─ people: 2                                                                   │
+│   ├─ budget: "2万"                                                               │
+│   ├─ phase: 1                                                                    │
+│   ├─ phaseLabel: "锁定约束"                                                      │
+│   ├─ route: ["东京", "京都", "大阪"]                                              │
+│   └─ daysPlan: [                                                                 │
+│        { day: 1, date: "2026-05-01", city: "东京", title: "抵达", segments: [] }, │
+│        ...                                                                       │
+│      ]                                                                           │
+│                                                                                   │
+│ Right panel shows skeleton immediately! User sees progress.                      │
+└──────────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│ 8. NEXT TURN: NEW SYSTEM PROMPT INCLUDES TRIPBOOK CONTEXT                        │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│ User: "帮我查一下机票价格"                                                        │
+│                                                                                   │
+│ System Prompt now includes:                                                      │
+│                                                                                   │
+│ # 行程参考书                                                                      │
+│ ## 用户已确认信息（勿重复询问）                                                    │
+│ - 目的地：日本（东京·京都·大阪） ✅                                                │
+│ - 日期：2026-05-01 ~ 2026-05-07 ✅                                                │
+│ - 人数：2人 ✅                                                                    │
+│ - 预算：2万 CNY（人均） ✅                                                        │
+│ ## 当前行程进度                                                                    │
+│ 阶段 1/7: 锁定约束                                                                │
+│ 路线: 东京 → 京都 → 大阪                                                          │
+│                                                                                   │
+│ AI sees confirmed info and knows NOT to re-ask these questions.                  │
+│ AI proceeds to search_flights to find prices.                                    │
+└──────────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│ TRIPBOOK LAYER DIAGRAM                                                              │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                       │
+│ Layer 1: StaticKnowledge                                                            │
+│   ├─ knowledgeRefs: ["日本", "泰国"]       (destination knowledge base keys)        │
+│   └─ activityRefs: ["潜水", "美食"]        (activity/interest keys)                 │
+│                                                                                       │
+│ Layer 2: DynamicData                                                                │
+│   ├─ weather[cityKey] → { city, current, forecast, _meta } (3hr TTL)              │
+│   ├─ exchangeRates[key] → { from, to, rate, _meta } (4hr TTL)                     │
+│   ├─ flightQuotes[] → { id, route, airline, price_cny, status, ... }              │
+│   ├─ hotelQuotes[] → { id, name, city, price_total_cny, status, ... }             │
+│   └─ webSearches[] → { query, summary, fetched_at }                               │
+│                                                                                       │
+│ Layer 3: UserConstraints                                                            │
+│   ├─ destination: { value, cities[], confirmed, confirmed_at, _reason }           │
+│   ├─ departCity: { value, airports[], confirmed, confirmed_at }                   │
+│   ├─ dates: { start, end, days, flexible, notes, confirmed, confirmed_at }       │
+│   ├─ people: { count, details, confirmed, confirmed_at }                         │
+│   ├─ budget: { value, per_person, currency, scope, notes, confirmed, ... }       │
+│   ├─ preferences: { tags[], notes, confirmed, confirmed_at }                      │
+│   ├─ specialRequests: [{ type, value, confirmed }, ...]                          │
+│   └─ _history: [{ field, from, to, changed_at, reason }, ...]                   │
+│                                                                                       │
+│ Layer 4: Itinerary                                                                  │
+│   ├─ phase: 0-7 (planning phase number)                                            │
+│   ├─ phaseLabel: "锁定约束" (human-readable)                                       │
+│   ├─ route: ["东京", "京都", "大阪"] (cities in order)                            │
+│   ├─ days: [                                                                       │
+│   │   {                                                                            │
+│   │     day: 1,                  (day number)                                      │
+│   │     date: "2026-05-01",      (ISO date)                                       │
+│   │     city: "东京",            (current city)                                    │
+│   │     title: "抵达东京",       (day theme)                                       │
+│   │     segments: [              (activities for this day)                         │
+│   │       {                                                                        │
+│   │         time: "14:00",       (time of activity)                               │
+│   │         title: "机场接待",   (activity name)                                   │
+│   │         location: "羽田",    (location)                                        │
+│   │         duration: "2小时",   (duration)                                        │
+│   │         transport: "电车",   (transport mode)                                  │
+│   │         transportTime: "30分钟", (travel time)                                 │
+│   │         type: "transportation",  (segment type)                                │
+│   │         notes: "SUICA卡"    (notes)                                           │
+│   │       },                                                                       │
+│   │       ...                                                                      │
+│   │     ]                                                                          │
+│   │   },                                                                           │
+│   │   ...                                                                          │
+│   │ ]                                                                              │
+│   ├─ budgetSummary: {            (cost breakdown)                                 │
+│   │   flights: { label, amount_cny, count },                                      │
+│   │   hotels: { label, amount_cny, nights },                                      │
+│   │   meals: { label, amount_cny },                                               │
+│   │   activities: { label, amount_cny },                                          │
+│   │   total_cny: 17280,          (total spent)                                    │
+│   │   budget_cny: 20000,         (total budget)                                   │
+│   │   remaining_cny: 2720        (remaining)                                      │
+│   │ }                                                                              │
+│   └─ reminders: [                (pre-trip reminders)                              │
+│       "出发前3天完成VJW注册",                                                       │
+│       "购买JR PASS"                                                                │
+│     ]                                                                              │
+│                                                                                       │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│ update_trip_info TOOL INPUT → TRIPBOOK METHOD FLOW                                  │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                       │
+│ AI Input (to tool):                                                                 │
+│   { constraints: {...}, phase: 1, itinerary: {...} }                               │
+│            ↓                          ↓                    ↓                         │
+│ Tool Processing (update-trip-info.js):                                             │
+│   - Validates phase in [1,7]                                                       │
+│   - Validates constraint fields                                                    │
+│   - Returns structured response                                                    │
+│            ↓                          ↓                    ↓                         │
+│ Server Apply (server.js):                                                          │
+│   tripBook.updateConstraints(constraints)                                          │
+│   ├─ Iterates fields: destination, departCity, dates, people, budget, preferences │
+│   ├─ If field changed, records to _history with timestamp                         │
+│   ├─ Sets confirmed_at auto if confirmed: true                                    │
+│   └─ Shallow merges with existing (preserves unmentioned subfields)                │
+│                                                                                       │
+│   tripBook.updatePhase(phase)                                                      │
+│   └─ Sets phase + phaseLabel from PHASE_LABELS array                               │
+│                                                                                       │
+│   tripBook.updateItinerary(itinerary)                                              │
+│   ├─ If route provided, replaces entire route                                      │
+│   ├─ If days provided:                                                             │
+│   │   - Merges by day number (updates existing day, adds new days)                 │
+│   │   - Smart segment merge: preserves existing segments if new.segments empty    │
+│   │   - Sorts days by day number                                                   │
+│   ├─ If budgetSummary provided, shallow merges                                     │
+│   └─ If reminders provided, appends to Set (deduplicates)                          │
+│                                                                                       │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│ KEY METHODS & OUTPUTS                                                               │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                       │
+│ WRITING:                                                                            │
+│   updateConstraints(delta)              → modifies this.constraints fields         │
+│   updateItinerary(delta)                → modifies this.itinerary fields           │
+│   setWeather(cityKey, data)             → adds/updates weather                     │
+│   setExchangeRate(key, data)            → adds/updates exchange rate               │
+│   addFlightQuote(quote)                 → appends flight, returns ID               │
+│   addHotelQuote(quote)                  → appends hotel, returns ID                │
+│                                                                                       │
+│ READING (for System Prompt):                                                       │
+│   toSystemPromptSection()                                                          │
+│     → Includes:                                                                    │
+│       • buildDynamicDataPromptSection()    (cached weather, rates, searches)      │
+│       • buildConstraintsPromptSection()    (confirmed ✅ vs pending ❓)             │
+│       • buildItineraryPromptSection()      (phase, route, selected bookings)       │
+│                                                                                       │
+│ READING (for Frontend):                                                            │
+│   toPanelData()                                                                    │
+│     → Returns flat object:                                                        │
+│       { destination, departCity, dates, days, people, budget, preferences,        │
+│         phase, phaseLabel, route, flights[], hotels[], weather, weatherList,      │
+│         budgetSummary, daysPlan[] }                                                │
+│                                                                                       │
+│ SERIALIZATION:                                                                      │
+│   toJSON()                              → serializable object                      │
+│   fromJSON(json)                        → reconstructs TripBook instance           │
+│                                                                                       │
+└─────────────────────────────────────────────────────────────────────────────────────┘
