@@ -213,12 +213,13 @@ async function runTool(funcName, funcArgs, toolId, sendSSE, tripBook) {
 
         // 机票报价 → TripBook
         if (funcName === 'search_flights' && Array.isArray(parsed.flights)) {
+          // origin/destination/date 在顶层，不在每条 flight 里
+          const route = `${parsed.origin || funcArgs.origin || '?'} → ${parsed.destination || funcArgs.destination || '?'}`;
+          const flightDate = parsed.date || funcArgs.date || '';
           for (const f of parsed.flights) {
             tripBook.addFlightQuote({
-              route: f.route || `${f.origin} → ${f.destination}`,
-              date: f.date, airline: f.airline,
-              price_usd: f.price_usd || f.price,
-              price_cny: f.price_cny,
+              route, date: flightDate, airline: f.airline,
+              price_usd: f.price_usd,
               duration: f.duration, stops: f.stops,
             });
           }
@@ -240,6 +241,17 @@ async function runTool(funcName, funcArgs, toolId, sendSSE, tripBook) {
         // 目的地知识 → TripBook 知识引用
         if (funcName === 'cache_destination_knowledge' && parsed.destination) {
           tripBook.addKnowledgeRef(parsed.destination);
+        }
+
+        // web_search → TripBook 搜索记录（避免 LLM 重复搜索相同主题）
+        if (funcName === 'web_search' && !parsed.error) {
+          const query = funcArgs.query || parsed.query || '';
+          // 提取首条结果的标题作为摘要
+          const firstResult = Array.isArray(parsed.results) && parsed.results[0];
+          const summary = firstResult
+            ? `找到 ${parsed.results.length} 条结果，首条: ${(firstResult.title || '').slice(0, 60)}`
+            : '已搜索';
+          tripBook.addWebSearch({ query, summary });
         }
 
         // update_trip_info → 核心：写入 TripBook 约束/行程/阶段
@@ -269,191 +281,10 @@ async function runTool(funcName, funcArgs, toolId, sendSSE, tripBook) {
 }
 
 // ============================================================
-// 从 AI 回复文本中提取行程关键信息（简易正则，首版方案）
+// [已移除] extractItineraryInfo / postProcessTripBook
+// 旧版通过正则从 AI 回复中提取行程信息，容易产生脏数据（如"五一土耳其"）。
+// 现在完全依赖 AI 主动调用 update_trip_info 工具写入结构化数据。
 // ============================================================
-function extractItineraryInfo(text, userText) {
-  const info = {};
-
-  // ── 预处理：去掉 Markdown 编号列表前缀（"1. "、"2. "），避免把列表标号带入提取结果
-  const cleaned = text.replace(/^\d+\.\s+/gm, '');
-
-  // ── 目的地 ──────────────────────────────────────────────────
-  // 优先匹配明确格式："目的地：XX"、"前往XX旅游/旅行/游玩"
-  // 排除 "从XX出发" 的误匹配
-  const destPatterns = [
-    /目的地[：:]\s*([\u4e00-\u9fa5]{2,}(?:[·、\/][\u4e00-\u9fa5]{2,})*)/,
-    /(?:前往|飞往|到达)([\u4e00-\u9fa5]{2,}(?:[·、\/][\u4e00-\u9fa5]{2,})*)(?:旅[游行]|游玩|度假|自由行)/,
-    /(?:去)([\u4e00-\u9fa5]{2,}(?:[·、\/][\u4e00-\u9fa5]{2,})*)(?:旅[游行]|游玩|度假|玩)/,
-    /(?:\d+\s*[天日](?:的)?)([\u4e00-\u9fa5]{2,})(?:之旅|旅[游行]|行程|自由行)/,
-    /规划(?:.*?)([\u4e00-\u9fa5]{2,})(?:之旅|旅[游行]|行程|自由行)/,
-  ];
-  for (const pat of destPatterns) {
-    const m = cleaned.match(pat);
-    if (m) {
-      const val = m[1];
-      // 过滤掉太短或明显非目的地的词
-      if (val.length >= 2 && !/^(哪个|什么|你的|我的|一个|这个|天的|天)/.test(val)) {
-        info.destination = val;
-        break;
-      }
-    }
-  }
-
-  // ── 天数 ────────────────────────────────────────────────────
-  const daysMatch = cleaned.match(/(\d+)\s*[天日](?:的|游|行程|旅)/);
-  if (daysMatch) info.days = parseInt(daysMatch[1]);
-
-  // ── 人数 ────────────────────────────────────────────────────
-  // 要求前面有语义上下文，避免匹配到 "1345年" 之类的数字
-  const peoplePatterns = [
-    /(\d+)\s*(?:个人|位(?:成人|旅客|游客|朋友)?)\s*(?:出[行发游]|旅[行游]|一起)?/,
-    /(?:共|一共|总共)\s*(\d+)\s*人/,
-    /(\d+)\s*人\s*(?:出[行发游]|旅[行游]|一起|同行)/,
-    /(?:我们|人数[：:])\s*(\d+)\s*人/,
-  ];
-  for (const pat of peoplePatterns) {
-    const m = cleaned.match(pat);
-    if (m) {
-      const n = parseInt(m[1]);
-      if (n >= 1 && n <= 50) { info.people = n; break; }
-    }
-  }
-
-  // ── 预算 ────────────────────────────────────────────────────
-  // 只匹配包含实际金额的预算表述，排除 AI 输出的 "3. 预算" 这种列表标题
-  const budgetPatterns = [
-    /预算[：:]\s*([\d,.]+\s*[万千]?\s*[元块人民币RMB]*(?:左右|以内|上下)?)/i,
-    /预算[约大]?(?:概|约)?\s*([\d,.]+\s*[万千]?\s*[元块人民币RMB]*)/i,
-    /([\d,.]+\s*[万千]\s*[元块]?)(?:左右|以内|上下)?\s*(?:的\s*)?预算/,
-    /(?:花费|费用|总价)[约大]?(?:概)?\s*([\d,.]+\s*[万千]?\s*[元块人民币RMB]*)/i,
-  ];
-  for (const pat of budgetPatterns) {
-    const m = cleaned.match(pat);
-    if (m) {
-      const val = m[1].trim();
-      // 必须包含实际数字，且不能只是 "预算" 两个字
-      if (/\d/.test(val) && val.length >= 2) {
-        info.budget = val;
-        break;
-      }
-    }
-  }
-
-  // ── 日期 ────────────────────────────────────────────────────
-  const dateMatch = cleaned.match(/(\d{1,2}月\d{1,2}[日号])\s*[-~到至]\s*(\d{1,2}月\d{1,2}[日号])/);
-  if (dateMatch) info.dates = `${dateMatch[1]} ~ ${dateMatch[2]}`;
-  const isoDateMatch = cleaned.match(/(\d{4}-\d{2}-\d{2})\s*[-~到至]\s*(\d{4}-\d{2}-\d{2})/);
-  if (isoDateMatch && !info.dates) info.dates = `${isoDateMatch[1]} ~ ${isoDateMatch[2]}`;
-
-  // ── 出发城市 ────────────────────────────────────────────────
-  // 优先从用户原文提取，避免 AI 回复中提到的城市（如"在巴黎和罗马"）被误识别
-  const departPatterns = [
-    /出发城市[：:]\s*([\u4e00-\u9fa5]{2,6})/,
-    /从([\u4e00-\u9fa5]{2,6})出发/,
-    /(?:坐标|位于)(?:在)?([\u4e00-\u9fa5]{2,6})(?:，|,|。)/,
-    /人在([\u4e00-\u9fa5]{2,4})(?:，|,|。)/,
-  ];
-  // 先从用户消息中提取，再从 AI 回复中提取
-  const departSources = userText ? [userText, cleaned] : [cleaned];
-  for (const source of departSources) {
-    if (info.departCity) break;
-    for (const pat of departPatterns) {
-      const m = source.match(pat);
-      if (m) {
-        const val = m[1];
-        // 排除疑问词和占位词
-        if (!/^(哪个|什么|哪里|哪座|某个|一个)/.test(val)) {
-          info.departCity = val;
-          break;
-        }
-      }
-    }
-  }
-
-  // ── 偏好标签（从用户原文提取，避免 AI 回复中提到"美食"等被误识别为用户偏好）──
-  const prefs = [];
-  const prefSource = userText || cleaned;
-  const prefKeywords = ['潜水', '美食', '文化', '购物', '海岛', '雨林', '寺庙', '自然', '历史', '冒险', '亲子', '蜜月', '摄影', '温泉', '滑雪'];
-  for (const kw of prefKeywords) {
-    if (prefSource.includes(kw)) prefs.push(kw);
-  }
-  if (prefs.length > 0) info.preferences = prefs;
-
-  // ── 阶段检测 ────────────────────────────────────────────────
-  if (cleaned.includes('阶段1') || cleaned.includes('锁定约束') || cleaned.includes('确认以下信息')) info.phase = 1;
-  else if (cleaned.includes('阶段2') || cleaned.includes('机票查询')) info.phase = 2;
-  else if (cleaned.includes('阶段3') || cleaned.includes('构建框架')) info.phase = 3;
-  else if (cleaned.includes('阶段4') || cleaned.includes('关键预订')) info.phase = 4;
-  else if (cleaned.includes('阶段5') || cleaned.includes('每日详情')) info.phase = 5;
-  else if (cleaned.includes('阶段6') || cleaned.includes('预算汇总')) info.phase = 6;
-  else if (cleaned.includes('阶段7') || cleaned.includes('导出总结')) info.phase = 7;
-
-  return Object.keys(info).length > 0 ? info : null;
-}
-
-// ============================================================
-// TripBook 后处理：AI 回复结束后检测并补充行程信息
-// ============================================================
-function postProcessTripBook(fullText, tripBook, sendSSE, aiCalledUpdate, userText) {
-  if (!fullText || !tripBook) return;
-
-  const itinInfo = extractItineraryInfo(fullText, userText);
-  if (!itinInfo) {
-    // 即便正则没提取到，如果 AI 已调用过 update_trip_info，也无需额外处理
-    return;
-  }
-
-  if (aiCalledUpdate) {
-    // AI 已推送结构化数据 → 只补充 TripBook 中尚无值的字段
-    const constraints = {};
-    const c = tripBook.constraints || {};
-    if (itinInfo.destination && !c.destination?.value) {
-      constraints.destination = { value: itinInfo.destination, confirmed: false };
-    }
-    if (itinInfo.departCity && !c.departCity?.value) {
-      constraints.departCity = { value: itinInfo.departCity, confirmed: false };
-    }
-    if (itinInfo.days && !c.dates?.days) {
-      constraints.dates = { ...(constraints.dates || {}), days: itinInfo.days, confirmed: false };
-    }
-    if (itinInfo.dates && !c.dates?.start) {
-      const [start, end] = itinInfo.dates.split(' ~ ');
-      constraints.dates = { ...(constraints.dates || {}), start, end, confirmed: false };
-    }
-    if (itinInfo.people && !c.people?.count) {
-      constraints.people = { count: itinInfo.people, confirmed: false };
-    }
-    if (itinInfo.budget && !c.budget?.value) {
-      constraints.budget = { value: itinInfo.budget, confirmed: false };
-    }
-    if (itinInfo.preferences && (!c.preferences?.tags || c.preferences.tags.length === 0)) {
-      constraints.preferences = { tags: itinInfo.preferences, confirmed: false };
-    }
-    if (Object.keys(constraints).length > 0) {
-      tripBook.updateConstraints(constraints);
-      sendSSE('tripbook_update', tripBook.toPanelData());
-    }
-  } else {
-    // AI 完全没调用 update_trip_info → 正则提取全量回写
-    const constraints = {};
-    if (itinInfo.destination) constraints.destination = { value: itinInfo.destination, confirmed: false };
-    if (itinInfo.departCity) constraints.departCity = { value: itinInfo.departCity, confirmed: false };
-    if (itinInfo.days) constraints.dates = { days: itinInfo.days, confirmed: false };
-    if (itinInfo.dates) {
-      const [start, end] = itinInfo.dates.split(' ~ ');
-      constraints.dates = { ...(constraints.dates || {}), start, end, confirmed: false };
-    }
-    if (itinInfo.people) constraints.people = { count: itinInfo.people, confirmed: false };
-    if (itinInfo.budget) constraints.budget = { value: itinInfo.budget, confirmed: false };
-    if (itinInfo.preferences) constraints.preferences = { tags: itinInfo.preferences, confirmed: false };
-    if (Object.keys(constraints).length > 0) tripBook.updateConstraints(constraints);
-    if (itinInfo.phase) tripBook.updatePhase(itinInfo.phase);
-    sendSSE('tripbook_update', tripBook.toPanelData());
-  }
-
-  // 兼容旧前端
-  sendSSE('itinerary_update', itinInfo);
-}
 
 // ============================================================
 // Quick Replies 检测：从 AI 回复中提取可交互选项
@@ -484,13 +315,16 @@ const QUICK_REPLY_PATTERNS = [
     test: /(?:日期.*弹性|日期.*调整|时间.*灵活|日期.*固定|能否.*调整|接受前后调整|是否灵活)/,
     text: '日期可以弹性调整吗？',
     options: ['可以前后调1-2天', '日期固定不能变'],
-    constraintField: 'dates'
+    constraintField: 'dates',
+    subField: 'flexible'
   },
   {
     // 请假天数
     test: /(?:最多.*请.*假|可以请几天假|请假.*天数)/,
     text: '最多能请几天假？',
     options: ['不请假（纯假期）', '1-2天', '3-5天', '可以灵活安排'],
+    constraintField: 'dates',
+    subField: 'notes'
   },
   {
     // 人数
@@ -505,7 +339,8 @@ const QUICK_REPLY_PATTERNS = [
     text: '同行人员情况？',
     options: ['全部成人', '有老人', '有儿童', '有老人和儿童'],
     multiSelect: true,
-    constraintField: 'people'
+    constraintField: 'people',
+    subField: 'details'
   },
   {
     // 预算
@@ -521,20 +356,24 @@ const QUICK_REPLY_PATTERNS = [
     test: /(?:是否已?包含机票|包含.*住宿.*费用|预算.*包含|是否含.*机票)/,
     text: '预算是否包含机票住宿？',
     options: ['包含所有费用', '不含机票', '不含机票和住宿'],
-    constraintField: 'budget'
+    constraintField: 'budget',
+    subField: 'scope'
   },
   {
     // 单人预算 vs 总预算
     test: /(?:单人.*还是.*总|人均.*还是.*总|家庭总预算|双人.*预算)/,
     text: '预算是人均还是总预算？',
     options: ['人均预算', '总预算（含所有人）'],
-    constraintField: 'budget'
+    constraintField: 'budget',
+    subField: 'per_person'
   },
   {
     // 红眼航班
     test: /(?:接受.*红眼|红眼航班|凌晨.*航班|深夜.*航班)/,
     text: '是否接受红眼航班？',
-    options: ['可以接受', '尽量避免', '完全不接受']
+    options: ['可以接受', '尽量避免', '完全不接受'],
+    constraintField: 'preferences',
+    subField: 'notes'
   },
   {
     // 住宿偏好
@@ -581,14 +420,21 @@ function extractQuickReplies(text, tripBook) {
     if (pattern.constraintField && tripBook) {
       const c = tripBook.constraints[pattern.constraintField];
       if (c) {
-        if (pattern.constraintField === 'preferences') {
-          if (c.tags?.length > 0) continue;
-        } else if (pattern.constraintField === 'dates') {
-          if (c.start || c.days) continue;
-        } else if (pattern.constraintField === 'people') {
-          if (c.count) continue;
+        // 如果指定了 subField，只检查对应子字段是否已有值
+        if (pattern.subField) {
+          const val = c[pattern.subField];
+          if (val != null && val !== '' && val !== false) continue;
         } else {
-          if (c.value != null && c.value !== '') continue;
+          // 无 subField 时按字段类型检查主值
+          if (pattern.constraintField === 'preferences') {
+            if (c.tags?.length > 0) continue;
+          } else if (pattern.constraintField === 'dates') {
+            if (c.start || c.days) continue;
+          } else if (pattern.constraintField === 'people') {
+            if (c.count) continue;
+          } else {
+            if (c.value != null && c.value !== '') continue;
+          }
         }
       }
     }
@@ -654,7 +500,6 @@ async function handleOpenAIChat(apiKey, model, systemPrompt, userMessages, sendS
   ];
 
   const MAX_TOOL_ROUNDS = 10;
-  let tripBookUpdatedByAI = false;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     // 真流式调用
@@ -720,17 +565,10 @@ async function handleOpenAIChat(apiKey, model, systemPrompt, userMessages, sendS
         }
 
         const resultStr = await runTool(funcName, funcArgs, toolId, sendSSE, tripBook);
-        if (funcName === 'update_trip_info') tripBookUpdatedByAI = true;
         messages.push({ role: 'tool', tool_call_id: toolCall.id, content: resultStr });
       }
 
       continue; // 继续下一轮
-    }
-
-    // 无工具调用 → 后处理检测并补充行程信息
-    if (fullText) {
-      const lastUserText = [...userMessages].reverse().find(m => m.role === 'user')?.content || '';
-      postProcessTripBook(fullText, tripBook, sendSSE, tripBookUpdatedByAI, lastUserText);
     }
 
     return fullText; // 返回完整回复文本供 quick_replies 检测
@@ -750,7 +588,6 @@ async function handleAnthropicChat(apiKey, model, systemPrompt, userMessages, se
   const messages = [...userMessages];
 
   const MAX_TOOL_ROUNDS = 10;
-  let tripBookUpdatedByAI = false;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     // 真流式调用
@@ -779,7 +616,6 @@ async function handleAnthropicChat(apiKey, model, systemPrompt, userMessages, se
       const toolResults = [];
       for (const toolUse of toolUseBlocks) {
         const resultStr = await runTool(toolUse.name, toolUse.input, toolUse.id, sendSSE, tripBook);
-        if (toolUse.name === 'update_trip_info') tripBookUpdatedByAI = true;
         toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: resultStr });
       }
 
@@ -787,13 +623,9 @@ async function handleAnthropicChat(apiKey, model, systemPrompt, userMessages, se
       continue;
     }
 
-    // 无工具调用 → 后处理检测并补充行程信息
+    // 无工具调用 → 返回完整回复文本
     const textBlocks = response.content.filter(b => b.type === 'text');
     const fullText = textBlocks.map(b => b.text).join('');
-    if (fullText) {
-      const lastUserText = [...userMessages].reverse().find(m => m.role === 'user')?.content || '';
-      postProcessTripBook(fullText, tripBook, sendSSE, tripBookUpdatedByAI, lastUserText);
-    }
 
     return fullText; // 返回完整回复文本供 quick_replies 检测
   }

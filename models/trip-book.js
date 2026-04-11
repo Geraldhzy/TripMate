@@ -37,6 +37,7 @@ class TripBook {
       exchangeRates: {},    // { "JPY_CNY": { from, to, rate, last_updated, _meta } }
       flightQuotes: [],     // [{ id, route, date, airline, price_usd, price_cny, ... }]
       hotelQuotes: [],      // [{ id, name, city, checkin, checkout, ... }]
+      webSearches: [],      // [{ query, summary, fetched_at }]
     };
 
     // Layer 3: 用户约束
@@ -108,6 +109,21 @@ class TripBook {
     return id;
   }
 
+  /** 记录 web_search 查询（按 query 去重，避免 LLM 重复搜索相同主题） */
+  addWebSearch(entry) {
+    const key = (entry.query || '').toLowerCase().trim();
+    if (!key) return;
+    const idx = this.dynamic.webSearches.findIndex(
+      s => (s.query || '').toLowerCase().trim() === key
+    );
+    const record = { ...entry, fetched_at: Date.now() };
+    if (idx >= 0) {
+      this.dynamic.webSearches[idx] = record;
+    } else {
+      this.dynamic.webSearches.push(record);
+    }
+  }
+
   /** 更新报价状态（quoted → selected → booked） */
   updateQuoteStatus(quoteId, status) {
     const allQuotes = [...this.dynamic.flightQuotes, ...this.dynamic.hotelQuotes];
@@ -144,7 +160,8 @@ class TripBook {
           });
         }
         delete newVal._reason;
-        this.constraints[field] = newVal;
+        // 浅合并：保留旧有子字段，用新值覆盖（避免部分更新导致丢字段）
+        this.constraints[field] = oldVal ? { ...oldVal, ...newVal } : newVal;
       }
     }
 
@@ -236,15 +253,18 @@ class TripBook {
       (c.destination.confirmed ? confirmed : pending).push(line);
     }
     if (c.departCity) {
-      const line = `出发城市：${c.departCity.value || ''}`;
+      const airports = c.departCity.airports?.length
+        ? `（可用机场：${c.departCity.airports.join('/')}）` : '';
+      const line = `出发城市：${c.departCity.value || ''}${airports}`;
       (c.departCity.confirmed ? confirmed : pending).push(line);
     }
     if (c.dates) {
       const days = c.dates.days ? `（${c.dates.days}天）` : '';
       const flex = c.dates.flexible ? '（日期灵活）' : '';
+      const notes = c.dates.notes ? `（${c.dates.notes}）` : '';
       const line = c.dates.start
-        ? `日期：${c.dates.start} ~ ${c.dates.end}${days}${flex}`
-        : `天数：${c.dates.days}天${flex}`;
+        ? `日期：${c.dates.start} ~ ${c.dates.end}${days}${flex}${notes}`
+        : `天数：${c.dates.days || '待定'}天${flex}${notes}`;
       (c.dates.confirmed ? confirmed : pending).push(line);
     }
     if (c.people) {
@@ -254,11 +274,16 @@ class TripBook {
     }
     if (c.budget) {
       const pp = c.budget.per_person ? '人均' : '总预算';
-      const line = `预算：${c.budget.value}（${pp}）`;
+      const curr = c.budget.currency && c.budget.currency !== 'CNY' ? ` ${c.budget.currency}` : '';
+      const scope = c.budget.scope ? `，${c.budget.scope}` : '';
+      const notes = c.budget.notes ? `（${c.budget.notes}）` : '';
+      const line = `预算：${c.budget.value}${curr}（${pp}${scope}）${notes}`;
       (c.budget.confirmed ? confirmed : pending).push(line);
     }
-    if (c.preferences && c.preferences.tags?.length) {
-      const line = `偏好：${c.preferences.tags.join('、')}`;
+    if (c.preferences && (c.preferences.tags?.length || c.preferences.notes)) {
+      const tagsStr = c.preferences.tags?.length ? c.preferences.tags.join('、') : '';
+      const notesStr = c.preferences.notes ? `（${c.preferences.notes}）` : '';
+      const line = `偏好：${tagsStr}${notesStr}`;
       (c.preferences.confirmed ? confirmed : pending).push(line);
     }
     for (const req of c.specialRequests) {
@@ -347,6 +372,17 @@ class TripBook {
     }
     if (rateLines.length > 0) {
       parts.push(`### 已缓存汇率（勿重复调用 get_exchange_rate）\n${rateLines.join('\n')}`);
+    }
+
+    // 已完成的搜索
+    const searchLines = [];
+    for (const s of this.dynamic.webSearches) {
+      const age = Math.round((now - s.fetched_at) / 60000);
+      const summary = s.summary || s.query;
+      searchLines.push(`- "${s.query}" → ${summary}（${age}分钟前）`);
+    }
+    if (searchLines.length > 0) {
+      parts.push(`### 已完成的搜索（勿重复搜索相同或相似主题）\n以下主题已通过 web_search 查询过，请直接使用对话中的结果，不要再次搜索相同或高度相似的内容：\n${searchLines.join('\n')}`);
     }
 
     return parts.length > 0 ? `## 已缓存动态数据\n${parts.join('\n\n')}` : '';

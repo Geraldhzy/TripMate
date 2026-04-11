@@ -30,11 +30,11 @@ const TOOL_DEF = {
         description: [
           '用户约束增量更新。可包含以下字段（只传变化的）：',
           'destination: { value: "日本", cities: ["东京","京都"], confirmed: true }，',
-          'departCity: { value: "北京", confirmed: true }，',
-          'dates: { start: "2026-05-01", end: "2026-05-07", days: 7, flexible: false, confirmed: true }，',
+          'departCity: { value: "北京", airports: ["PEK","PKX"], confirmed: true }，',
+          'dates: { start: "2026-05-01", end: "2026-05-07", days: 7, flexible: false, notes: "请假天数不限", confirmed: true }，',
           'people: { count: 2, details: "2个成人", confirmed: true }，',
-          'budget: { value: "2万", per_person: false, currency: "CNY", confirmed: true }，',
-          'preferences: { tags: ["美食","文化"], confirmed: true }，',
+          'budget: { value: "2万", per_person: true, currency: "CNY", scope: "含机票住宿", notes: "可适当超预算", confirmed: true }，',
+          'preferences: { tags: ["美食","文化"], notes: "以休闲为主，不赶行程，不接受红眼航班", confirmed: true }，',
           'specialRequests: [{ type: "dietary", value: "清真", confirmed: true }]'
         ].join('')
       },

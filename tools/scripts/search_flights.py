@@ -6,18 +6,47 @@
 import sys
 import json
 import re
+import warnings
+import os
+
+# 抑制 primp/fast-flights 的 Impersonate 警告输出
+warnings.filterwarnings("ignore")
+# 部分库通过 stderr 输出警告，重定向 stderr 以避免干扰 JSON 输出
+_original_stderr = sys.stderr
+sys.stderr = open(os.devnull, 'w')
+
 
 def parse_price_usd(price_str):
     """从 '$165' 等字符串提取数字，返回 float 或 None"""
     if not price_str:
         return None
-    m = re.search(r'[\d,]+\.?\d*', str(price_str).replace(',', ''))
+    s = str(price_str)
+    # "Price unavailable" 或类似文本 → None
+    if 'unavailable' in s.lower() or 'unknown' in s.lower():
+        return None
+    m = re.search(r'[\d,]+\.?\d*', s.replace(',', ''))
     return float(m.group()) if m else None
+
+
+def parse_stops(stops_val):
+    """将 stops 转为整数，兼容 int/str/'Unknown'/None"""
+    if stops_val is None:
+        return None
+    if isinstance(stops_val, int):
+        return stops_val
+    s = str(stops_val).strip().lower()
+    if s in ('0', 'nonstop', 'direct'):
+        return 0
+    m = re.search(r'\d+', s)
+    if m:
+        return int(m.group())
+    return None  # 'Unknown' 等无法解析的情况
+
 
 def main():
     try:
         params = json.loads(sys.stdin.read())
-    except:
+    except Exception:
         print(json.dumps({"error": "参数解析失败"}))
         return
 
@@ -43,7 +72,7 @@ def main():
         last_error = None
 
         # 依次尝试各种 fetch_mode，直到成功
-        for mode in ['common', 'local', 'fallback']:
+        for mode in ['common', 'fallback', 'force-fallback']:
             try:
                 result = get_flights(
                     flight_data=[flight_data],
@@ -74,16 +103,16 @@ def main():
         seen = set()
         flights = []
         for f in result.flights:
-            dep = getattr(f, "departure", "") or ""
-            arr = getattr(f, "arrival", "") or ""
-            price_raw = getattr(f, "price", "") or ""
-            airline = (getattr(f, "name", "") or "").strip()
-            stops = getattr(f, "stops", 0)
-            duration = getattr(f, "duration", "") or ""
-            is_best = getattr(f, "is_best", False)
+            dep = str(getattr(f, "departure", "") or "").strip()
+            arr = str(getattr(f, "arrival", "") or "").strip()
+            price_raw = str(getattr(f, "price", "") or "").strip()
+            airline = str(getattr(f, "name", "") or "").strip()
+            stops = parse_stops(getattr(f, "stops", None))
+            duration = str(getattr(f, "duration", "") or "").strip()
+            is_best = bool(getattr(f, "is_best", False))
 
-            # 跳过出发/到达时间均为空的幽灵条目（无实际航班信息）
-            if not dep.strip() and not arr.strip():
+            # 只跳过完全无用的条目：既无航司又无时间又无价格
+            if not dep and not arr and not airline and not price_raw:
                 continue
 
             # 解析价格（可能为 None，表示"Price unavailable"）
@@ -92,19 +121,23 @@ def main():
             if price_usd is not None and price_usd <= 0:
                 continue
 
-            key = (dep.strip(), arr.strip(), airline)
+            # 去重键：优先用出发+到达+航司，若时间缺失则用航司+价格
+            if dep or arr:
+                key = (dep, arr, airline)
+            else:
+                key = (airline, price_raw)
             if key in seen:
                 continue
             seen.add(key)
 
             flights.append({
-                "airline": airline,
-                "departure": dep.strip(),
-                "arrival": arr.strip(),
-                "duration": duration.strip(),
+                "airline": airline or "未知航司",
+                "departure": dep or "时间未知",
+                "arrival": arr or "时间未知",
+                "duration": duration or "未知",
                 "stops": stops,
-                "price_usd": price_usd,            # None 表示价格不可用
-                "price": price_raw.strip() if price_usd else "Price unavailable",
+                "price_usd": price_usd,
+                "price": price_raw if price_usd else "Price unavailable",
                 "is_best": is_best
             })
 
@@ -134,6 +167,7 @@ def main():
             "error": f"搜索失败: {str(e)}",
             "suggestion": f"请使用 web_search 工具搜索：{origin} to {destination} {date} cheapest flight price"
         }))
+
 
 if __name__ == "__main__":
     main()
