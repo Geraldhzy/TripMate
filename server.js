@@ -3,6 +3,10 @@ const path = require('path');
 const { OpenAI } = require('openai');
 const Anthropic = require('@anthropic-ai/sdk');
 const { v4: uuidv4 } = require('uuid');
+const rateLimit = require('express-rate-limit');
+const Sentry = require('@sentry/node');
+const { validate, sanitizeBody, validateHeaders, chatRequestSchema } = require('./middleware/validation');
+const { getHelmetConfig, getCorsConfig, additionalSecurityHeaders, globalErrorHandler } = require('./middleware/security');
 const { getToolDefinitions, executeToolCall, getToolDefinitionsForAnthropic } = require('./tools');
 const { buildSystemPrompt } = require('./prompts/system-prompt');
 const { getCachedRates } = require('./tools/exchange-rate');
@@ -11,15 +15,94 @@ const { TripBook } = require('./models/trip-book');
 const { initCache: initDestCache } = require('./tools/dest-knowledge');
 
 const app = express();
+
+// ============================================================
+// Sentry Error Monitoring Setup
+// ============================================================
+if (process.env.SENTRY_DSN) {
+  Sentry.init({
+    dsn: process.env.SENTRY_DSN,
+    environment: process.env.NODE_ENV || 'development',
+    tracesSampleRate: process.env.SENTRY_TRACE_SAMPLE_RATE ? parseFloat(process.env.SENTRY_TRACE_SAMPLE_RATE) : 0.1,
+    debug: process.env.SENTRY_DEBUG === 'true'
+  });
+
+  // Sentry request handler middleware (must be first)
+  app.use(Sentry.Handlers.requestHandler());
+
+  // Sentry transaction middleware for performance monitoring
+  app.use(Sentry.Handlers.tracingHandler());
+}
+
+// ============================================================
+// Security Middleware Setup
+// ============================================================
+
+// Helmet - set security headers
+app.use(getHelmetConfig());
+
+// CORS - handle cross-origin requests
+const corsConfig = getCorsConfig();
+app.use(require('cors')(corsConfig));
+
+// Additional custom security headers
+app.use(additionalSecurityHeaders());
+
+// ============================================================
+// Request Parsing & Sanitization
+// ============================================================
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Input sanitization middleware
+app.use(sanitizeBody());
 
 const PORT = process.env.PORT || 3000;
 
 // ============================================================
+// Rate Limiting Configuration
+// ============================================================
+
+// General rate limiter: 100 requests per hour per IP
+const generalLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 100,
+  message: { error: '请求过于频繁，请稍后再试' },
+  standardHeaders: true, // Return rate limit info in `RateLimit-*` headers
+  legacyHeaders: false, // Disable `X-RateLimit-*` headers
+  skip: (req) => req.headers['x-skip-rate-limit'] === process.env.RATE_LIMIT_BYPASS_KEY, // Allow bypass with special header
+});
+
+// Chat-specific rate limiter: 20 messages per hour per IP
+const chatLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 20,
+  message: { error: '您的对话请求过于频繁，请稍后再试' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.ip, // Use IP address as key
+  skip: (req) => req.headers['x-skip-rate-limit'] === process.env.RATE_LIMIT_BYPASS_KEY,
+});
+
+// Tool execution rate limiter: 50 per hour per IP
+// (Applied globally to catch tool-heavy interactions)
+const toolLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 50,
+  message: { error: '工具调用请求过于频繁，请稍后再试' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.ip,
+  skip: (req) => req.headers['x-skip-rate-limit'] === process.env.RATE_LIMIT_BYPASS_KEY,
+});
+
+// Apply general rate limiter to all routes
+app.use(generalLimiter);
+
+// ============================================================
 // POST /api/chat — Agent 核心路由（SSE 流式）
 // ============================================================
-app.post('/api/chat', async (req, res) => {
+app.post('/api/chat', validateHeaders(), validate(chatRequestSchema), chatLimiter, toolLimiter, async (req, res) => {
   const { messages, provider, model, knownRates: bodyRates, knownWeather: bodyWeather, tripBookSnapshot } = req.body;
   const apiKey = req.headers['x-api-key'];
   const baseUrl = req.headers['x-base-url'] || '';
@@ -27,13 +110,6 @@ app.post('/api/chat', async (req, res) => {
   // 客户端通过 body 传来的已知汇率/天气缓存
   const clientRates = Array.isArray(bodyRates) ? bodyRates : [];
   const clientWeather = Array.isArray(bodyWeather) ? bodyWeather : [];
-
-  if (!apiKey) {
-    return res.status(401).json({ error: '请先在设置中配置 API Key' });
-  }
-  if (!messages || !Array.isArray(messages)) {
-    return res.status(400).json({ error: '消息格式错误' });
-  }
 
   // SSE 头
   res.setHeader('Content-Type', 'text/event-stream');
@@ -124,6 +200,12 @@ app.post('/api/chat', async (req, res) => {
     sendSSE('done', {});
   } catch (err) {
     console.error('Agent error:', err);
+    // Capture error in Sentry
+    if (process.env.SENTRY_DSN) {
+      Sentry.captureException(err, {
+        tags: { context: 'chat_endpoint' }
+      });
+    }
     sendSSE('error', { message: err.message || '未知错误' });
   } finally {
     res.end();
@@ -279,15 +361,15 @@ async function runTool(funcName, funcArgs, toolId, sendSSE, tripBook) {
   } catch (toolErr) {
     const errMsg = `工具 ${funcName} 执行失败: ${toolErr.message}`;
     sendSSE('tool_result', { id: toolId, name: funcName, resultLabel: null });
+    // Capture tool execution errors in Sentry
+    if (process.env.SENTRY_DSN) {
+      Sentry.captureException(toolErr, {
+        tags: { context: 'tool_execution', tool: funcName }
+      });
+    }
     return errMsg;
   }
 }
-
-// ============================================================
-// [已移除] extractItineraryInfo / postProcessTripBook
-// 旧版通过正则从 AI 回复中提取行程信息，容易产生脏数据（如"五一土耳其"）。
-// 现在完全依赖 AI 主动调用 update_trip_info 工具写入结构化数据。
-// ============================================================
 
 // ============================================================
 // Quick Replies 检测：从 AI 回复中提取可交互选项
@@ -637,6 +719,22 @@ async function handleAnthropicChat(apiKey, model, systemPrompt, userMessages, se
 }
 
 // ============================================================
+// Sentry Error Handler Middleware
+// ============================================================
+if (process.env.SENTRY_DSN) {
+  app.use(Sentry.Handlers.errorHandler({
+    shouldHandleError(error) {
+      // Only handle HTTP 5xx errors and other critical issues
+      if (error.status === 404) return false;
+      return error.status >= 500 || !error.status;
+    }
+  }));
+}
+
+// Global error handler (must be last)
+app.use(globalErrorHandler());
+
+// ============================================================
 // 启动服务器
 // ============================================================
 initDestCache();
@@ -644,4 +742,7 @@ initDestCache();
 app.listen(PORT, () => {
   console.log(`\n🌏 AI Travel Planner 已启动`);
   console.log(`   http://localhost:${PORT}\n`);
+  if (process.env.SENTRY_DSN) {
+    console.log(`   Sentry monitoring enabled\n`);
+  }
 });
