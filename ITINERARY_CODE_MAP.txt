@@ -1,0 +1,365 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                 ITINERARY PANEL UI — COMPLETE CODE MAP                      ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+┌─ public/js/itinerary.js (437 lines) ──────────────────────────────────────────┐
+│                                                                               │
+│  GLOBAL STATE                                                                 │
+│  ├─ itineraryState (lines 6-23)                                              │
+│  │  ├─ destination: ''                                                        │
+│  │  ├─ departCity: ''                                                         │
+│  │  ├─ dates: ''                                                              │
+│  │  ├─ days: 0                                                                │
+│  │  ├─ people: 0                                                              │
+│  │  ├─ budget: ''                                                             │
+│  │  ├─ preferences: []                                                        │
+│  │  ├─ phase: 0 (mapped 0-7 → 1-4)                                           │
+│  │  ├─ phaseLabel: ''                                                         │
+│  │  ├─ flights: []                                                            │
+│  │  ├─ hotels: []                                                             │
+│  │  ├─ weather: null                                                          │
+│  │  ├─ route: [] ......................... TripBook extension                  │
+│  │  ├─ daysPlan: [] ..................... TripBook extension                  │
+│  │  └─ budgetSummary: null .............. TripBook extension                  │
+│  │                                                                            │
+│  └─ PHASE_LABELS (lines 25-31)                                               │
+│     ['' | '确认需求' | '规划行程' | '完善细节' | '预算总结']                 │
+│                                                                               │
+│  MAPPING FUNCTIONS                                                            │
+│  └─ mapPhase(raw) (lines 34-40)                                              │
+│     Converts internal 0-7 → UI 1-4                                            │
+│                                                                               │
+│  STATE UPDATES                                                                │
+│  ├─ updateItinerary(data) (lines 45-80)      ← Incremental merge              │
+│  ├─ updateFromTripBook(data) (lines 302-344) ← SSE handler (MAIN)             │
+│  └─ clearItinerary() (lines 85-103)          ← Reset state                    │
+│                                                                               │
+│  RENDERING FUNCTIONS                                                          │
+│  ├─ renderItinerary() (lines 108-230) ········ MAIN RENDER FUNCTION           │
+│  │  ├─ Empty state check (lines 114-117)                                      │
+│  │  ├─ Basic rows (lines 122-178)                                             │
+│  │  │  ├─ destination (line 123)                                              │
+│  │  │  ├─ departCity (line 128)                                               │
+│  │  │  ├─ dates/days (line 133-136)                                           │
+│  │  │  ├─ people (line 140)                                                   │
+│  │  │  ├─ budget (line 145)                                                   │
+│  │  │  ├─ preferences tags (line 150-151)                                     │
+│  │  │  ├─ weather (line 158)                                                  │
+│  │  │  └─ progress bar (line 162-178)                                         │
+│  │  │                                                                         │
+│  │  ├─ Bookings sections (lines 181-204)                                      │
+│  │  │  ├─ flights (lines 181-191)                                             │
+│  │  │  └─ hotels (lines 194-204)                                              │
+│  │  │                                                                         │
+│  │  ├─ TripBook extensions (lines 207-219)                                    │
+│  │  │  ├─ renderRoute() (line 208)                                            │
+│  │  │  ├─ renderDaysPlan() (line 213)                                         │
+│  │  │  └─ renderBudgetSummary() (line 218)                                    │
+│  │  │                                                                         │
+│  │  └─ Event binding (lines 224-229)                                          │
+│  │     └─ Edit button listeners                                               │
+│  │                                                                            │
+│  ├─ buildRow(icon, label, valueHtml, editableField) (lines 235-245)          │
+│  │  Returns: HTML for single itinerary row with edit button                   │
+│  │                                                                            │
+│  ├─ renderRoute(route) (lines 349-360)                                        │
+│  │  Returns: HTML with city pills and arrows (→)                              │
+│  │  Example: Tokyo → Kyoto → Osaka                                            │
+│  │                                                                            │
+│  ├─ renderDaysPlan(daysPlan) (lines 365-384)                                  │
+│  │  Expects: [{day, date, city, title, segmentCount}]                         │
+│  │  Returns: HTML with day cards (light theme)                                │
+│  │                                                                            │
+│  ├─ renderBudgetSummary(summary) (lines 389-424)                              │
+│  │  Expects: {flights, hotels, attractions, meals, transport, misc,           │
+│  │            total_cny, budget_cny, remaining_cny}                           │
+│  │  Returns: HTML with budget breakdown + total + surplus/deficit             │
+│  │                                                                            │
+│  EDITING                                                                      │
+│  ├─ startInlineEdit(btn) (lines 250-297)                                      │
+│  │  Creates input, commits on blur/Enter, sends update via chat               │
+│  │                                                                            │
+│  UTILITIES                                                                    │
+│  └─ escItinHtml(str) (lines 429-436)                                          │
+│     XSS prevention: escapes &, <, >, "                                        │
+│                                                                               │
+└───────────────────────────────────────────────────────────────────────────────┘
+
+┌─ public/css/style.css (CSS lines 64-325) ─────────────────────────────────────┐
+│                                                                               │
+│  CONTAINER                                                                    │
+│  ├─ .itinerary-panel (line 64)                                               │
+│  │  width: 380px | display: flex | flex-direction: column                    │
+│  │  background: dark gradient (slate-800 → slate-900)                         │
+│  │  height: 100vh | flex-shrink: 0                                            │
+│  │                                                                            │
+│  ├─ .itinerary-header (line 73)                                              │
+│  │  height: 56px (fixed) | flex-shrink: 0                                     │
+│  │  background: darker gradient | border-bottom                               │
+│  │                                                                            │
+│  └─ .itinerary-body (line 89)                                                │
+│     flex: 1 | overflow-y: auto | padding: 16px                               │
+│     Custom scrollbar (thin, semi-transparent)                                 │
+│                                                                               │
+│  EMPTY STATE                                                                  │
+│  └─ .itinerary-empty (line 98)                                               │
+│     center-aligned icon + message                                             │
+│                                                                               │
+│  ROW STYLING                                                                  │
+│  ├─ .itin-row (line 113)                                                     │
+│  │  display: flex | gap: 10px | padding: 11px 14px                           │
+│  │  background: rgba(255,255,255,.04) | hover effect                         │
+│  │  Layout: [icon] [label] [value] [edit-btn]                                │
+│  │                                                                            │
+│  ├─ .itin-icon (line 126)                                                    │
+│  │  width: 28px (fixed) | text-align: center | font-size: 1.1rem             │
+│  │                                                                            │
+│  ├─ .itin-label (line 132)                                                   │
+│  │  width: 52px (fixed) | font-size: 12px | color: slate-600                │
+│  │                                                                            │
+│  ├─ .itin-value (line 138)                                                   │
+│  │  flex: 1 | font-size: 14px | color: slate-200 | font-weight: 500          │
+│  │                                                                            │
+│  ├─ .itin-edit-btn (line 144)                                                │
+│  │  opacity: 0 (hidden by default) | appears on row:hover                     │
+│  │  color: cyan (#0891b2)                                                     │
+│  │                                                                            │
+│  └─ .itin-inline-input (line 159)                                            │
+│     flex: 1 | border: 1px solid cyan | bg: rgba(255,255,255,.1)              │
+│     color: slate-200 | padding: 4px 8px                                       │
+│                                                                               │
+│  TAGS                                                                         │
+│  └─ .itin-tag (line 172)                                                     │
+│     display: inline-block | padding: 2px 10px | border-radius: 12px          │
+│     background: rgba(cyan, .2) | color: cyan | font-size: 12px               │
+│                                                                               │
+│  PROGRESS BAR                                                                 │
+│  ├─ .itin-progress (line 184)                                                │
+│  │  display: flex | gap: 3px                                                  │
+│  │                                                                            │
+│  ├─ .itin-progress-seg (line 188)                                            │
+│  │  flex: 1 | height: 4px | background: rgba(255,255,255,.1)                │
+│  │                                                                            │
+│  ├─ .itin-progress-seg.done (line 194)                                       │
+│  │  background: cyan (#0891b2)                                                │
+│  │                                                                            │
+│  ├─ .itin-progress-seg.active (line 197)                                     │
+│  │  background: bright-cyan (#22d3ee)                                         │
+│  │  animation: itinPulse 1.5s infinite (opacity 1 → 0.5 → 1)                 │
+│  │                                                                            │
+│  SECTION HEADERS                                                              │
+│  └─ .itin-section-title (line 207)                                           │
+│     font-size: 12px | font-weight: 600 | color: slate-600                    │
+│     text-transform: uppercase | letter-spacing: 0.5px                         │
+│     margin: 16px 0 8px                                                        │
+│                                                                               │
+│  BOOKING CARDS (Flights/Hotels)                                              │
+│  ├─ .itin-booking-card (line 215)                                            │
+│  │  background: rgba(255,255,255,.06) | border: 1px solid rgba(.1)           │
+│  │  border-radius: 10px | padding: 10px 14px | margin-bottom: 8px            │
+│  │  font-size: 13px | color: slate-300 | line-height: 1.5                    │
+│  │                                                                            │
+│  ├─ .itin-booking-title (line 225)                                           │
+│  │  font-weight: 600 | color: slate-200 | margin-bottom: 4px                 │
+│  │                                                                            │
+│  └─ .itin-booking-detail (line 230)                                          │
+│     font-size: 12px | color: slate-600                                        │
+│                                                                               │
+│  ROUTE VISUALIZATION                                                          │
+│  ├─ .itin-route (line 236)                                                   │
+│  │  display: flex | align-items: center | flex-wrap: wrap | gap: 4px          │
+│  │                                                                            │
+│  ├─ .route-stop (line 242)                                                   │
+│  │  background: light-cyan (#e0f2fe) | color: blue (#0369a1)                │
+│  │  padding: 2px 8px | border-radius: 12px | font-size: 12px                 │
+│  │  font-weight: 600 | white-space: nowrap                                    │
+│  │                                                                            │
+│  └─ .route-arrow (line 251)                                                  │
+│     color: slate-400 (#94a3b8) | font-size: 13px | content: →                │
+│                                                                               │
+│  DAILY ITINERARY CARDS (Light theme!)                                        │
+│  ├─ .itin-day-card (line 258)                                                │
+│  │  background: light (#f8fafc) ← Contrasts with dark panel                  │
+│  │  border: 1px solid slate-200 | border-radius: 8px                         │
+│  │  padding: 8px 10px | margin: 4px 0                                         │
+│  │                                                                            │
+│  ├─ .itin-day-header (line 265)                                              │
+│  │  display: flex | gap: 6px | margin-bottom: 3px                             │
+│  │                                                                            │
+│  ├─ .day-num (line 271)                                                      │
+│  │  background: blue (#3b82f6, or --accent-color) | color: white             │
+│  │  font-size: 11px | font-weight: 700 | padding: 1px 7px                    │
+│  │  border-radius: 10px                                                       │
+│  │                                                                            │
+│  ├─ .day-date (line 279)                                                     │
+│  │  font-size: 11px | color: slate-600                                        │
+│  │                                                                            │
+│  ├─ .day-city (line 283)                                                     │
+│  │  font-size: 11px | color: blue (#0369a1) | font-weight: 600               │
+│  │                                                                            │
+│  ├─ .itin-day-body (line 288)                                                │
+│  │  font-size: 12px | color: slate-700 | padding-left: 2px                   │
+│  │                                                                            │
+│  └─ .day-seg-count (line 293)                                                │
+│     font-size: 11px | color: slate-500                                        │
+│                                                                               │
+│  BUDGET SUMMARY                                                               │
+│  ├─ .itin-budget (line 299)                                                  │
+│  │  padding: 4px 0                                                            │
+│  │                                                                            │
+│  ├─ .budget-item (line 302)                                                  │
+│  │  display: flex | justify-content: space-between                            │
+│  │  padding: 3px 10px | font-size: 12px | color: slate-700                   │
+│  │                                                                            │
+│  ├─ .budget-label (line 309)                                                 │
+│  │  flex-shrink: 0                                                            │
+│  │                                                                            │
+│  ├─ .budget-amount (line 312)                                                │
+│  │  font-weight: 600 | font-variant-numeric: tabular-nums (monospace)         │
+│  │                                                                            │
+│  ├─ .budget-total (line 316)                                                 │
+│  │  border-top: 1px solid slate-200 | margin-top: 4px | padding-top: 6px    │
+│  │  font-weight: 700 | color: slate-900                                       │
+│  │                                                                            │
+│  ├─ .budget-ok (line 323)                                                    │
+│  │  .budget-amount { color: green (#16a34a) }                                │
+│  │                                                                            │
+│  └─ .budget-over (line 324)                                                  │
+│     .budget-amount { color: red (#dc2626) }                                   │
+│                                                                               │
+│  ANIMATIONS                                                                   │
+│  └─ @keyframes itinPulse (line 201-204)                                      │
+│     opacity: 1 → 0.5 → 1 (pulsing effect for active progress segment)        │
+│                                                                               │
+└───────────────────────────────────────────────────────────────────────────────┘
+
+┌─ models/trip-book.js (Data export, lines 426-477) ────────────────────────────┐
+│                                                                               │
+│  toPanelData() {                                                              │
+│    return {                                                                   │
+│      // Basic constraints                                                     │
+│      destination: string,                                                     │
+│      departCity: string,                                                      │
+│      dates: string ("2024-04-15 ~ 2024-04-22"),                              │
+│      days: number,                                                            │
+│      people: number,                                                          │
+│      budget: string ("¥50000"),                                               │
+│      preferences: string[],                                                   │
+│                                                                               │
+│      // Phase                                                                 │
+│      phase: number (1-4),                                                     │
+│      phaseLabel: string,                                                      │
+│                                                                               │
+│      // Route                                                                 │
+│      route: string[] (["Tokyo", "Kyoto", "Osaka"]),                           │
+│                                                                               │
+│      // Flights (filtered: selected/booked or all if < 5)                    │
+│      flights: [{                                                              │
+│        route: string,                                                         │
+│        airline: string,                                                       │
+│        price: string ("¥4500"),                                               │
+│        time: string,                                                          │
+│        status: string ("selected" | "booked" | "quoted")                      │
+│      }],                                                                      │
+│                                                                               │
+│      // Hotels (filtered: selected/booked or all if < 5)                     │
+│      hotels: [{                                                               │
+│        name: string,                                                          │
+│        city: string,                                                          │
+│        price: string ("¥800/night"),                                          │
+│        nights: number,                                                        │
+│        status: string ("selected" | "booked" | "quoted")                      │
+│      }],                                                                      │
+│                                                                               │
+│      // Weather                                                               │
+│      weather: {                                                               │
+│        city: string,                                                          │
+│        temp_c: number,                                                        │
+│        description: string                                                    │
+│      } | null,                                                                │
+│                                                                               │
+│      // Budget summary                                                        │
+│      budgetSummary: {                                                         │
+│        flights: { label: string, amount_cny: number },                        │
+│        hotels: { label: string, amount_cny: number },                         │
+│        attractions: { label: string, amount_cny: number },                    │
+│        meals: { label: string, amount_cny: number },                          │
+│        transport: { label: string, amount_cny: number },                      │
+│        misc: { label: string, amount_cny: number },                           │
+│        total_cny: number,                                                     │
+│        budget_cny: number,                                                    │
+│        remaining_cny: number (optional)                                       │
+│      } | null,                                                                │
+│                                                                               │
+│      // Daily plan                                                            │
+│      daysPlan: [{                                                             │
+│        day: number,                                                           │
+│        date: string ("2024-04-15"),                                           │
+│        city: string,                                                          │
+│        title: string,                                                         │
+│        segmentCount: number                                                   │
+│      }]                                                                       │
+│    }                                                                          │
+│  }                                                                            │
+│                                                                               │
+└───────────────────────────────────────────────────────────────────────────────┘
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                            DATA FLOW DIAGRAM                                 ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+    Server (TripBook.toPanelData())
+           ↓
+    SSE Event: "tripbook_update"
+           ↓
+    Frontend: eventSource listener
+           ↓
+    updateFromTripBook(data)
+    ├─ Merge simple fields: destination, dates, people, budget
+    ├─ Map phase: 0-7 → 1-4
+    ├─ Replace arrays: flights, hotels, daysPlan
+    └─ Merge TripBook: route, budgetSummary
+           ↓
+    renderItinerary()
+    ├─ Check if any data exists
+    ├─ Build HTML from itineraryState
+    ├─ Set DOM: #itinerary-body.innerHTML = html
+    └─ Bind events: .itin-edit-btn.addEventListener('click', startInlineEdit)
+           ↓
+    DOM Update + Render
+           ↓
+    User sees updated panel
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                         KEY STATISTICS                                       ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+Files:
+  • public/js/itinerary.js        437 lines
+  • public/css/style.css          972 lines (262 for itinerary)
+  • models/trip-book.js           508 lines (52 for toPanelData)
+
+State:
+  • itineraryState fields         22 (basic + bookings + TripBook extensions)
+  • CSS classes                   40+ (specific to itinerary panel)
+
+Rendering:
+  • Main render function          renderItinerary() — 122 lines
+  • Helper functions              4 (buildRow, renderRoute, renderDaysPlan, renderBudgetSummary)
+  • Sections rendered             9 (basics, preferences, weather, progress, flights, hotels, route, days, budget)
+
+Layout:
+  • Panel width                   380px (fixed)
+  • Panel height                  100vh (full screen)
+  • Header height                 56px (fixed)
+  • Theme                         Dark (slate-800 to slate-900 gradient)
+  • Responsive breakpoint         ≤900px (hidden)
+
+Security:
+  • XSS escaping                  escItinHtml() function (4 character replacements)
+  • Applied to                    All user-visible strings
+
+Performance:
+  • Re-render trigger             updateFromTripBook() → full renderItinerary()
+  • No virtual scroll             OK for typical 8-20 day trips
+  • Event delegation              No (direct click binding)

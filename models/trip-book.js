@@ -471,7 +471,16 @@ class TripBook {
       budgetSummary: it.budgetSummary,
       daysPlan: it.days.map(d => ({
         day: d.day, date: d.date, city: d.city, title: d.title,
-        segmentCount: d.segments?.length || 0,
+        segments: (d.segments || []).map(seg => ({
+          time: seg.time || '',
+          title: seg.title || seg.activity || '',
+          location: seg.location || '',
+          duration: seg.duration || '',
+          transport: seg.transport || '',
+          transportTime: seg.transportTime || '',
+          notes: seg.notes || '',
+          type: seg.type || 'activity',
+        })),
       })),
     };
   }

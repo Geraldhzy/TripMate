@@ -36,7 +36,18 @@
       "Bash(npm list:*)",
       "Bash(git init:*)",
       "Bash(git add:*)",
-      "Bash(git commit -m 'Add comprehensive project documentation and status summary:*)"
+      "Bash(git commit -m 'Add comprehensive project documentation and status summary:*)",
+      "Bash(git config:*)",
+      "Bash(git commit:*)",
+      "Bash(wc:*)",
+      "Bash(ls -lh *.md *.txt)",
+      "Bash(ls -lh /Users/geraldhuang/DEV/ai-travel-planner/*.md)",
+      "Bash(timeout 5 npm start)",
+      "Bash(grep -E \"\\\\.md$|\\\\.txt$\")",
+      "Bash(ls:*)",
+      "Bash(pip3 show:*)",
+      "Bash(pip3 install:*)",
+      "Bash(git rm:*)"
     ]
   }
 }
