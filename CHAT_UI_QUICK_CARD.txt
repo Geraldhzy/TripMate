@@ -1,0 +1,263 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                         CHAT UI — QUICK REFERENCE CARD                      ║
+║                                                                              ║
+║                    AI Travel Planner — Sticky Note Edition                   ║
+║                                                                              ║
+║                              Print this! 📋                                  ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+ARCHITECTURE AT A GLANCE
+─────────────────────────────────────────────────────────────────────────────
+
+             User Input
+                 ↓
+         sendMessage()
+                 ↓
+      ┌──────────┴──────────┐
+      ↓                     ↓
+appendUserMessage()    streamChat()
+(Create DOM bubble)    (Open SSE)
+      ↓                     ↓
+   Show text          SSE Reader Loop
+      ↓                     ↓
+  Scroll             handleSSEEvent()
+   Down                     ↓
+              ┌─────────────┼─────────────┐
+              ↓             ↓             ↓
+          'token'      'tool_*'      'done'
+              ↓             ↓             ↓
+         renderMD()  Create/Update   Close
+         ↓           .tool-status
+      bubble.innerHTML
+
+
+KEY FACTS TO REMEMBER
+─────────────────────────────────────────────────────────────────────────────
+
+#chat-area
+├─ .message.user (right-aligned, cyan)
+└─ .message.assistant (left-aligned, white)
+   └─ .message-body (flex column)
+      ├─ .tool-container (above)
+      │  └─ .tool-status (running/done)
+      └─ .bubble (markdown HTML below)
+
+
+THREE LINES TO KNOW
+─────────────────────────────────────────────────────────────────────────────
+
+Line 717 ⭐    renderMarkdown() — WHERE TO HOOK FOR CHIPS
+Line 226       'token' case — Called on every text update
+Line 182       handleSSEEvent() called — Routes all event types
+
+
+EVENT TYPES (Simplified)
+─────────────────────────────────────────────────────────────────────────────
+
+'token'               → Stream of text, accumulate + rerender
+'tool_start'          → Show spinner
+'tool_result'         → Replace spinner with checkmark ✅
+'tool_start' → 'tool_result'  → One tool execution cycle
+
+Others: error, done, itinerary_update, tripbook_update, etc.
+
+
+MARKDOWN RENDERING PIPELINE
+─────────────────────────────────────────────────────────────────────────────
+
+Input text → escapeHtml() → code blocks → inline code → headers 
+→ bold/italic → links → blockquotes → lists → tables → paragraphs 
+→ cleanup excess tags → Output HTML
+
+
+🔥 WHERE TO ADD CHIPS
+─────────────────────────────────────────────────────────────────────────────
+
+✅ Location: In renderMarkdown() function
+✅ When: After escapeHtml(), before code blocks
+✅ How: Add regex pattern: /~\[([^\]]+)\]\(chip:([^)]+)\)/g
+✅ Output: <button class="chip" data-action="$2">$1</button>
+✅ Syntax: ~[Label](chip:action_id)
+
+
+EXAMPLE: Adding Chips
+─────────────────────────────────────────────────────────────────────────────
+
+In renderMarkdown(), right after line 717-718:
+
+  let html = escapeHtml(text);
+  
+  // ✨ ADD THIS LINE:
+  html = html.replace(/~\[([^\]]+)\]\(chip:([^)]+)\)/g, 
+    '<button class="chip" data-action="$2">$1</button>');
+  
+  // Continue with existing code blocks...
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, ...);
+
+Then in handleSSEEvent(), after bubble.innerHTML = renderMarkdown(...):
+
+  // ✨ ADD THIS:
+  bubble.querySelectorAll('.chip').forEach(chip => {
+    chip.onclick = () => handleChipClick(chip.dataset.action);
+  });
+
+
+CSS FOR CHIPS (add to style.css)
+─────────────────────────────────────────────────────────────────────────────
+
+.chip {
+  display: inline-block;
+  padding: 6px 12px;
+  background: #e0f2fe;
+  color: #0369a1;
+  border: 1px solid #bfdbfe;
+  border-radius: 16px;
+  cursor: pointer;
+  transition: all .2s;
+  margin: 0 2px 4px 0;
+  font-weight: 500;
+  font-size: 13px;
+}
+
+.chip:hover {
+  background: #0369a1;
+  color: #fff;
+  transform: translateY(-2px);
+  box-shadow: 0 2px 8px rgba(3,105,161,.2);
+}
+
+.chip:active {
+  transform: translateY(0);
+}
+
+
+STATE FLAGS TO KNOW
+─────────────────────────────────────────────────────────────────────────────
+
+isStreaming = false          ← Can send new message?
+userScrolledUp = false       ← Show "jump to latest" button?
+currentTripId = null         ← What trip are we editing?
+fullText = ''                ← Accumulating response text
+
+
+STORAGE (Where Data Lives)
+─────────────────────────────────────────────────────────────────────────────
+
+localStorage:
+  tp_trips           (array of {id, title, messages})
+  tp_rate_cache      (4h TTL)
+  tp_weather_cache   (3h TTL)
+  tp_apiKey, tp_provider, tp_model
+
+sessionStorage:
+  tp_tripbook        (current trip snapshot)
+
+chatHistory (JS array):
+  [{role: 'user', content: '...'}, {role: 'assistant', content: '...'}]
+
+
+QUICK FILE LOCATIONS
+─────────────────────────────────────────────────────────────────────────────
+
+Chat container:     public/index.html line 88
+User message fn:    public/js/chat.js line 607
+AI message fn:      public/js/chat.js line 619
+Stream fn:          public/js/chat.js line 120
+Markdown fn:        public/js/chat.js line 717 ⭐ MAIN HOOK
+Message CSS:        public/css/style.css line 463
+Bubble CSS:         public/css/style.css line 501
+Tool status CSS:    public/css/style.css line 552
+
+
+IMPLEMENTATION CHECKLIST
+─────────────────────────────────────────────────────────────────────────────
+
+□ Read docs (30 min)
+□ Add .chip CSS to style.css (5 min)
+□ Add regex to renderMarkdown() (5 min)
+□ Add click handler attachment (10 min)
+□ Create handleChipClick() function (10 min)
+□ Test with sample markdown (10 min)
+□ Debug hover/active states (10 min)
+□ Test with real AI responses (15 min)
+
+Total: ~1.5 hours
+
+
+MARKDOWN CHIP SYNTAX EXAMPLE
+─────────────────────────────────────────────────────────────────────────────
+
+Server sends:
+  "Here are your options:\n\n~[Short Trip](chip:duration_short)\n
+   ~[Medium Trip](chip:duration_medium)\n~[Long Trip](chip:duration_long)"
+
+renderMarkdown() converts to:
+  <p>Here are your options:</p>
+  <button class="chip" data-action="duration_short">Short Trip</button>
+  <button class="chip" data-action="duration_medium">Medium Trip</button>
+  <button class="chip" data-action="duration_long">Long Trip</button>
+
+User clicks → handleChipClick(action_id) → Send to AI as new message
+
+
+COMMON GOTCHAS
+─────────────────────────────────────────────────────────────────────────────
+
+❌ Don't: Append to bubble.innerHTML directly (lost on re-render)
+✅ Do: Parse via regex in renderMarkdown()
+
+❌ Don't: Forget to query/attach click handlers
+✅ Do: Query after bubble.innerHTML is set
+
+❌ Don't: Block streaming for chip clicks
+✅ Do: Allow clicks anytime or queue them
+
+❌ Don't: Use divs for chips
+✅ Do: Use <button> elements (semantic, accessible)
+
+❌ Don't: Forget to escape chip action values
+✅ Do: Validate action_id on backend
+
+
+THREE APPROACHES COMPARISON
+─────────────────────────────────────────────────────────────────────────────
+
+MARKDOWN SYNTAX:        1⭐ Quickest
+  Pros: No backend changes, works with streaming, simple
+  Cons: Limited metadata
+  Time: 2-3 hours
+
+SSE EVENTS:             Option 2
+  Pros: Clean, extensible, rich data
+  Cons: Backend changes, breaks streaming
+  Time: 4+ hours
+
+HYBRID (RECOMMENDED):   3⭐⭐ Best
+  Pros: Markdown for speed, optional SSE for richness
+  Cons: Slightly more complex
+  Time: 3-4 hours
+
+
+DONE? VERIFY WITH THIS
+─────────────────────────────────────────────────────────────────────────────
+
+□ I can show the DOM structure from memory
+□ I know what renderMarkdown() does
+□ I can trace: token → event → handler → render
+□ I understand SSE format (event: \n data: \n)
+□ I can explain why renderMarkdown() is the best hook
+□ I know which CSS variables to use
+□ I can write the regex pattern for chips
+□ I know where to attach click handlers
+
+If all ✅, you're ready to code!
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+Keep this card handy while implementing! 🚀
+
+Questions? Check INVESTIGATION_INDEX.txt "Q&A" section
+More detail? Read CHAT_UI_STRUCTURE.md section 9
+

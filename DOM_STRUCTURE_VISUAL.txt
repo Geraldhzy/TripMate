@@ -1,0 +1,302 @@
+╔════════════════════════════════════════════════════════════════════════════════╗
+║                    CHAT UI STRUCTURE & DOM HIERARCHY                          ║
+╚════════════════════════════════════════════════════════════════════════════════╝
+
+┌─ #chat-area .chat-area
+│  ├─ (Initially) .welcome-msg
+│  │  └─ .welcome-card
+│  │     ├─ .welcome-icon       (emoji 🌍)
+│  │     ├─ h2                  (greeting text)
+│  │     ├─ .welcome-sub        (tagline)
+│  │     ├─ .welcome-caps       (feature badges)
+│  │     └─ .quick-starts       (quick option buttons)
+│  │
+│  ├─ .message.user              (right-aligned)
+│  │  ├─ .avatar.user-avatar    (✈ emoji)
+│  │  └─ .bubble                (user text, escapeHtml)
+│  │
+│  ├─ .message.assistant         (left-aligned)
+│  │  ├─ .avatar.ai-avatar      (🌍 emoji)
+│  │  └─ .message-body          (flex column)
+│  │     ├─ .tool-container
+│  │     │  ├─ .tool-status.running
+│  │     │  │  ├─ .spinner      (animation: spin)
+│  │     │  │  └─ <span>        (tool label)
+│  │     │  │
+│  │     │  └─ .tool-status.done
+│  │     │     └─ <span>        (✅ + label)
+│  │     │
+│  │     └─ .bubble              (markdown HTML)
+│  │        ├─ <h1>, <h2>, <h3>
+│  │        ├─ <p>
+│  │        ├─ <ul>, <ol>
+│  │        ├─ .table-wrapper
+│  │        ├─ <code>, <pre>
+│  │        ├─ <blockquote>
+│  │        ├─ <strong>, <em>
+│  │        └─ <a>               (target=_blank)
+│  │
+│  └─ .message.assistant
+│     └─ (more messages...)
+│
+└─ [Scroll hint button #scroll-hint appears during streaming]
+
+
+╔════════════════════════════════════════════════════════════════════════════════╗
+║                    MESSAGE FLOW: TEXT STREAMING PIPELINE                      ║
+╚════════════════════════════════════════════════════════════════════════════════╝
+
+1. USER SENDS MESSAGE
+   └─ sendMessage() called
+      ├─ appendUserMessage(text)
+      │  └─ Create DOM: <div class="message user">
+      │     └─ Append to #chat-area
+      │
+      └─ streamChat(settings)
+         └─ POST /api/chat with SSE
+
+2. SSE STREAM READING (Lines 163-189)
+   ┌─ while true loop
+   │  ├─ reader.read() → chunk of bytes
+   │  ├─ decoder.decode() → string
+   │  ├─ buffer.split('\n') → lines array
+   │  └─ For each line:
+   │     ├─ Check "event: " prefix → eventType
+   │     └─ Check "data: " prefix → JSON parse
+   │        └─ handleSSEEvent(type, data, bubble, toolContainer)
+   │
+   └─ On stream end:
+      └─ Save fullText to chatHistory
+         └─ Scroll to bottom
+
+3. EVENT HANDLERS (Lines 224-340)
+
+   ┌─ 'token' event
+   │  ├─ fullText += data.text
+   │  ├─ currentText = fullText
+   │  ├─ html = renderMarkdown(currentText)
+   │  └─ bubble.innerHTML = html
+   │     └─ Scroll to bottom
+
+   ├─ 'tool_start' event
+   │  ├─ Create <div class="tool-status running">
+   │  ├─ Add spinner animation
+   │  └─ Append to toolContainer
+   │
+   ├─ 'tool_result' event
+   │  ├─ Find running tool element
+   │  ├─ Change class → "done"
+   │  ├─ Replace spinner with checkmark
+   │  └─ Update label with resultLabel
+   │
+   ├─ 'itinerary_update' event
+   │  └─ Call updateItinerary(data) [in itinerary.js]
+   │
+   ├─ 'tripbook_update' event
+   │  ├─ Call updateFromTripBook(data)
+   │  └─ Save to sessionStorage.tp_tripbook
+   │
+   ├─ 'error' event
+   │  └─ Append error message to bubble
+   │
+   └─ 'done' event
+      └─ Mark remaining tool spinners as complete
+
+
+╔════════════════════════════════════════════════════════════════════════════════╗
+║                    MARKDOWN RENDERING (renderMarkdown)                        ║
+║                    Input: Raw text (no HTML)                                  ║
+║                    Output: HTML string                                        ║
+╚════════════════════════════════════════════════════════════════════════════════╝
+
+Step-by-step pipeline (Lines 717-768):
+
+Input: "# Title\n**bold** text"
+  ↓
+1. escapeHtml()
+   "# Title\n**bold** text" → (unchanged, no HTML chars)
+  ↓
+2. Code blocks: ```lang\n...\n```
+   → <pre><code class="lang-js">...</code></pre>
+  ↓
+3. Inline code: `code`
+   → <code>code</code>
+  ↓
+4. Headers: # / ## / ###
+   → <h1> / <h2> / <h3>
+  ↓
+5. Bold/Italic: ** / *
+   → <strong> / <em>
+  ↓
+6. Links: [text](url)
+   → <a href="url" target="_blank">text</a>
+  ↓
+7. Blockquote: > text
+   → <blockquote>text</blockquote>
+  ↓
+8. Horizontal rule: ---
+   → <hr>
+  ↓
+9. Lists: - item or * item or 1. item
+   → <ul><li>item</li></ul> / <ol><li>item</li></ol>
+  ↓
+10. Tables: |cell|cell|
+    → <table><tr><td>cell</td><td>cell</td></tr></table>
+  ↓
+11. Paragraphs: \n\n splits
+    → </p><p>
+  ↓
+12. Cleanup: Remove excess <br>, <p> around block elements
+    → Final HTML
+
+Output: "<h1>Title</h1><p><strong>bold</strong> text</p>"
+
+
+╔════════════════════════════════════════════════════════════════════════════════╗
+║                    PROPOSED: CLICKABLE OPTION CHIPS                           ║
+║                    Integration Points                                         ║
+╚════════════════════════════════════════════════════════════════════════════════╝
+
+OPTION 1: Markdown Syntax Extension
+─────────────────────────────────────
+
+Syntax: ~[Label](chip:action_id)
+
+In renderMarkdown() at line 717-720 (after escapeHtml, before code blocks):
+
+  html = html.replace(/~\[([^\]]+)\]\(chip:([^)]+)\)/g, 
+    '<button class="chip" data-action="$2">$1</button>');
+
+Then in CSS (add to style.css):
+
+  .chip {
+    display: inline-block;
+    padding: 6px 12px;
+    background: #e0f2fe;
+    color: #0369a1;
+    border: 1px solid #bfdbfe;
+    border-radius: 16px;
+    cursor: pointer;
+    transition: all .2s;
+    margin: 0 2px 4px 0;
+    font-weight: 500;
+    font-size: 13px;
+  }
+  
+  .chip:hover {
+    background: #0369a1;
+    color: #fff;
+    transform: translateY(-2px);
+    box-shadow: 0 2px 8px rgba(3,105,161,.2);
+  }
+  
+  .chip:active { transform: translateY(0); }
+
+Then add click handler after rendering (in handleSSEEvent):
+
+  setTimeout(() => {
+    bubble.querySelectorAll('.chip').forEach(chip => {
+      chip.onclick = () => handleChipClick(chip.dataset.action);
+    });
+  }, 0);
+
+
+OPTION 2: Dedicated SSE Event
+──────────────────────────────
+
+Backend sends:
+  event: option_chip
+  data: {"label":"Option 1","action":"select_option","value":"opt1"}
+
+In handleSSEEvent() add case:
+
+  case 'option_chip': {
+    const chipEl = document.createElement('button');
+    chipEl.className = 'chip';
+    chipEl.textContent = data.label;
+    chipEl.dataset.action = data.action;
+    chipEl.dataset.value = data.value;
+    chipEl.onclick = () => handleChipClick(data);
+    
+    // Append to bubble
+    bubble.appendChild(chipEl);
+    scrollToBottom();
+    break;
+  }
+
+
+OPTION 3: Hybrid (RECOMMENDED)
+──────────────────────────────
+
+Use markdown syntax for content (works with streaming), but support rich metadata 
+via optional SSE event. Gives flexibility:
+
+- Content flows naturally in markdown stream
+- Chips rendered immediately in markdown output
+- Optional `chip_metadata` event enriches chips with callbacks/data
+- Backwards compatible
+
+
+╔════════════════════════════════════════════════════════════════════════════════╗
+║                    KEY TECHNICAL DETAILS                                      ║
+╚════════════════════════════════════════════════════════════════════════════════╝
+
+SCROLL MANAGEMENT
+─────────────────
+- isStreaming = true during response
+- userScrolledUp = tracked by scroll listener
+- If user scrolls up, show "#scroll-hint" button
+- scrollToBottom() only works if userScrolledUp = false
+- After stream ends, userScrolledUp reset to false
+
+
+TOOL STATUS DISPLAY
+───────────────────
+GROUPED_TOOLS = ['search_flights', 'search_hotels']
+
+- Multiple tool invocations of same type aggregate into 1 row
+- Shows progress: "✈️ 正在查询机票… (3/5)"
+- On completion: "✅ ✈️ 已查询 5 条航线"
+
+Non-grouped tools:
+- Each displayed separately below previous
+- Show specific search parameters from arguments
+
+
+CHAT HISTORY PERSISTENCE
+────────────────────────
+localStorage:
+  - 'tp_trips': Array of {id, title, createdAt, updatedAt, messages}
+  - 'tp_rate_cache': Exchange rates (4h TTL)
+  - 'tp_weather_cache': Weather data (3h TTL)
+
+sessionStorage:
+  - 'tp_tripbook': Current trip structured data (trip book snapshot)
+
+
+SETTINGS STORAGE
+────────────────
+localStorage:
+  - 'tp_provider': Selected AI provider (openai/anthropic/deepseek)
+  - 'tp_model': Selected model
+  - 'tp_apiKey': User's API key (never sent to server)
+  - 'tp_baseUrl': Optional custom base URL
+
+
+CURRENT TRIGGER POINTS FOR EXTENSION
+─────────────────────────────────────
+1. renderMarkdown() - Line 717
+   ✓ Perfect place to add custom markdown syntax
+   ✓ Runs for every token/update
+   ✓ HTML already sanitized
+
+2. handleSSEEvent() - Line 224
+   ✓ Can add new event types here
+   ✓ Has access to bubble element
+   ✓ Can append to DOM directly
+
+3. After markdown render (post-render hook)
+   ✓ Could query bubble for .chip elements
+   ✓ Attach click handlers
+   ✓ Modify as needed
+

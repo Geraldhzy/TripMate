@@ -1,0 +1,329 @@
+╔════════════════════════════════════════════════════════════════════════════════╗
+║              SSE STREAMING EVENT FLOW - AI Travel Planner                       ║
+╚════════════════════════════════════════════════════════════════════════════════╝
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ USER SENDS MESSAGE                                                              │
+└─────────────────────────────────────────────────────────────────────────────────┘
+              │
+              ▼
+        sendMessage() [Line 74]
+              │
+              ├─ Adds to chatHistory
+              ├─ appendUserMessage()
+              ├─ Input cleared
+              └─ streamChat(settings)
+              
+              
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ STREAM INITIALIZATION                                                           │
+└─────────────────────────────────────────────────────────────────────────────────┘
+              │
+              ▼
+        streamChat() [Line 120]
+              │
+              ├─ isStreaming = true
+              ├─ Send button disabled
+              │
+              └─ appendAssistantMessage() [Line 125]
+                 │
+                 └─ Creates DOM:
+                    ┌─────────────────────────┐
+                    │ <div class="message">   │
+                    │   <avatar>🌍</avatar>   │
+                    │   <message-body>        │
+                    │     <tool-container/>   │  ← empty initially
+                    │     <bubble>            │
+                    │       <typing-dots>     │  ← 3 bouncing dots
+                    │     </bubble>           │
+                    │   </message-body>       │
+                    │ </div>                  │
+                    └─────────────────────────┘
+
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ STREAMING RESPONSE PROCESSING                                                   │
+│ (Lines 152-190: fetch() + getReader() loop)                                     │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+    fetch('/api/chat') 
+         │
+         ▼
+    resp.body.getReader()
+         │
+         ▼
+    ┌─ Read chunks ──┐
+    │                │
+    └─ Parse SSE ────┤
+         │           │
+         │ Loop until done()
+         │           │
+         └───────────┘
+         
+              │
+              ▼
+    Extract "event: TYPE" & "data: JSON"
+              │
+              ▼
+    handleSSEEvent(type, data, bubble, toolContainer)
+
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ EVENT HANDLING SWITCH CASES (Lines 224-344)                                     │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+        │
+        ├─ 'token' ──────────────────┐
+        │                            │
+        │                     RENDER IN REAL-TIME
+        │                     Lines 226-230
+        │                            │
+        │                     ┌──────▼──────┐
+        │                     │ Append text │
+        │                     │ to fullText │
+        │                     └─────┬────────┘
+        │                           │
+        │                     renderMarkdown()
+        │                           │
+        │                     bubble.innerHTML = HTML
+        │                           │
+        │                     scrollToBottom()
+        │
+        ├─ 'tool_start' ─────────────┐
+        │                            │
+        │              TOOL STATUS (above bubble)
+        │              Lines 232-263
+        │                            │
+        │         ┌─────────────────┬┴────────────────┐
+        │         │                 │                │
+        │    GROUPED        NON-GROUPED         [other tools]
+        │    (search_flights, search_hotels)
+        │         │                 │
+        │    ┌────▼────┐       ┌────▼───────┐
+        │    │ GROUP    │       │ INDIVIDUAL │
+        │    │ COUNTER  │       │ STATUS     │
+        │    │ 1/N → 2/N│       │ BADGE      │
+        │    └────┬────┘       └────┬───────┘
+        │         │                 │
+        │    spinner rotating      spinner rotating
+        │         │                 │
+        │         └────┬────────────┘
+        │              │
+        │         ┌────▼─────────────────┐
+        │         │ DOM added to         │
+        │         │ tool-container       │
+        │         └────────────┬─────────┘
+        │                      │
+        │                scrollToBottom()
+        │
+        ├─ 'tool_result' ────────────┐
+        │                            │
+        │              TOOL COMPLETES
+        │              Lines 265-293
+        │                            │
+        │         ┌─────────────────┬┴────────────────┐
+        │         │                 │                │
+        │    IS GROUPED?      IS GROUPED?
+        │    (check dataset)  (check dataset)
+        │         │                 │
+        │         │ YES             │ NO
+        │         │                 │
+        │    ┌────▼────┐       ┌────▼───────┐
+        │    │ Update  │       │ Find       │
+        │    │ counter │       │ [data-tool-id]
+        │    │ done++  │       └────┬───────┘
+        │    └────┬────┘            │
+        │         │            ┌────▼─────────┐
+        │    ┌────▼──────┐     │ Change class │
+        │    │ done <     │     │ running→done │
+        │    │ total?    │     └────┬─────────┘
+        │    └─┬──┬──────┘          │
+        │      NO YES       ┌───────▼────────┐
+        │      │  │         │ Remove spinner │
+        │      │  │         │ Add checkmark  │
+        │      │  │         │ + label        │
+        │      │  └────┐    └────────────────┘
+        │      │       │
+        │  spinner   spinner
+        │  update   +remove
+        │  (N/M)   (✅ label)
+        │
+        ├─ 'rate_cached' ────────────┐
+        │                            │
+        │                  CACHE RATE TO STORAGE
+        │                  Lines 295-298
+        │
+        ├─ 'weather_cached' ─────────┐
+        │                            │
+        │              CACHE & UPDATE TRIP PANEL
+        │              Lines 300-307
+        │
+        ├─ 'itinerary_update' ───────┐
+        │                            │
+        │            UPDATE RIGHT PANEL (trip info)
+        │            Lines 309-311
+        │
+        ├─ 'tripbook_update' ────────┐
+        │                            │
+        │         SAVE STRUCTURED TRIP DATA
+        │         (sessionStorage)
+        │         Lines 313-318
+        │
+        ├─ 'quick_replies' ──────────┐
+        │                            │
+        │         RENDER CHIP BUTTONS
+        │         Below bubble
+        │         Lines 320-322
+        │
+        ├─ 'error' ──────────────────┐
+        │                            │
+        │     APPEND ERROR TO BUBBLE
+        │     (red text)
+        │     Lines 326-328
+        │
+        └─ 'done' ───────────────────┐
+                                     │
+                        STREAM COMPLETE
+                        (final safety cleanup)
+                        Lines 330-342
+                                     │
+                        Force-complete all
+                        remaining spinners
+
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ STREAM ENDS (finally block)                                                     │
+│ Lines 199-218                                                                   │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+    │
+    ├─ isStreaming = false
+    ├─ Button enabled
+    │
+    ├─ Query remaining running spinners:
+    │  toolContainer.querySelectorAll('.tool-status.running')
+    │  │
+    │  └─ Force-complete each:
+    │     ├─ className = 'tool-status done'
+    │     ├─ Remove spinner
+    │     └─ Add ✅ + label
+    │
+    ├─ scrollToBottom()
+    │
+    ├─ saveTripSnapshot() [auto-save to localStorage]
+    │
+    └─ chatHistory.push({ role: 'assistant', content: fullText })
+       (if fullText exists)
+
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ VISUAL STATE DURING STREAMING (timeline)                                        │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+t=0ms [Initial]
+  ┌──────────────────┐
+  │ 🌍              │
+  │ ⏱️⏱️⏱️ (typing dots)
+  └──────────────────┘
+
+
+t=50ms [First tool starts]
+  ┌──────────────────┐
+  │ 🌍              │
+  │ ✈️ 正在查询机票... (spinner)
+  │ ⏱️⏱️⏱️ (typing dots still)
+  └──────────────────┘
+
+
+t=150ms [First token arrives]
+  ┌──────────────────┐
+  │ 🌍              │
+  │ ✈️ 正在查询机票... (spinner)
+  │ 我为你...
+  └──────────────────┘
+  (typing dots replaced with actual text)
+
+
+t=300ms [More tokens + second tool starts]
+  ┌──────────────────┐
+  │ 🌍              │
+  │ ✈️ 正在查询机票... (spinner)
+  │ 🏨 正在查询酒店... (spinner)
+  │ 我为你找到了最好的航线和酒店选择...
+  └──────────────────┘
+
+
+t=500ms [First tool finishes]
+  ┌──────────────────┐
+  │ 🌍              │
+  │ ✅ ✈️ 已查询 3 条航线
+  │ 🏨 正在查询酒店... (spinner)
+  │ 我为你找到了最好的航线和酒店选择...
+  │ 特别推荐...
+  └──────────────────┘
+
+
+t=800ms [Stream complete, all tools done]
+  ┌──────────────────┐
+  │ 🌍              │
+  │ ✅ ✈️ 已查询 3 条航线
+  │ ✅ 🏨 已查询 5 家酒店
+  │ 我为你找到了最好的航线和酒店选择...
+  │ 特别推荐以下几个组合...
+  │ 价格从 3500 起...
+  └──────────────────┘
+  (spinner removed, checkmarks shown)
+
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ GROUPED TOOLS PROGRESS COUNTER (example)                                        │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+First tool_start (search_flights call 1):
+  ✈️ 正在查询机票…
+
+Second tool_start (search_flights call 2):
+  ✈️ 正在查询机票… (1/2)
+
+Third tool_start (search_flights call 3):
+  ✈️ 正在查询机票… (2/3)
+
+First tool_result (search_flights call 1 done):
+  ✈️ 正在查询机票… (2/3)
+  (still has spinner, waiting for others)
+
+tool_result for calls 2 & 3 complete:
+  ✅ ✈️ 已查询 3 条航线
+  (spinner removed, shows total)
+
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ MARKDOWN RENDERING PER TOKEN (example)                                          │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+fullText = ""
+bubble.innerHTML = renderMarkdown("") → displays typing dots
+
+token: "推荐"
+fullText = "推荐"
+bubble.innerHTML = renderMarkdown("推荐") → <p>推荐</p>
+
+token: "以下"
+fullText = "推荐以下"
+bubble.innerHTML = renderMarkdown("推荐以下") → <p>推荐以下</p>
+
+token: "\n## "
+fullText = "推荐以下\n## "
+bubble.innerHTML = renderMarkdown("...") → <h2>(next line)</h2>
+
+token: "航线"
+fullText = "推荐以下\n## 航线"
+bubble.innerHTML = renderMarkdown("...") → <h2>航线</h2>
+
+token: "\n- "
+fullText += "..."
+bubble.innerHTML = renderMarkdown("...") → <ul><li>(next item)</li></ul>
+
+(and so on, every token re-renders entire markdown)
+
+

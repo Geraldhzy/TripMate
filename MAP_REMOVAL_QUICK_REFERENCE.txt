@@ -1,0 +1,53 @@
+================================================================================
+                   MAP REMOVAL - QUICK REFERENCE SUMMARY
+================================================================================
+
+TOTAL ITEMS TO REMOVE/DELETE: 26 distinct map-related code blocks
+
+FILES TO DELETE COMPLETELY (2):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. public/js/map.js                    (251 lines - entire file)
+2. tools/focus-map.js                  (80 lines - entire file)
+
+
+FILES TO MODIFY (6):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. public/index.html (5 changes)
+   ├─ Line 8:         Remove Leaflet CSS CDN link
+   ├─ Line 84:        Remove map toggle button
+   ├─ Lines 124-137:  Remove entire map panel HTML block
+   ├─ Line 141:       Remove Leaflet JS CDN script
+   └─ Line 142:       Remove map.js script reference
+
+2. public/css/style.css (9 changes)
+   ├─ Lines 64-71:    Remove .map-panel flex container styles
+   ├─ Lines 73-90:    Remove .map-header and .map-title styles
+   ├─ Lines 91-97:    Remove .poi-count badge styles
+   ├─ Lines 99-125:   Remove map action button styles (.map-action-btn, .map-clear-btn)
+   ├─ Lines 127-130:  Remove #map container styles
+   ├─ Lines 132-136:  Remove Leaflet popup dark mode overrides
+   ├─ Lines 138-169:  Remove POI list styles (.poi-list*, .poi-empty, .poi-card*)
+   └─ Lines 211-219:  Remove .map-panel collapse animation styles
+
+3. public/js/chat.js (3 changes)
+   ├─ Lines 294-297:  Remove 'poi_data' SSE event handler case
+   ├─ Lines 299-302:  Remove 'map_focus' SSE event handler case
+   └─ Line 615:       Remove clearMap() call in clearChat() function
+
+4. server.js (3 changes)
+   ├─ Lines 123-125:  Remove 'focus_map' tool result label case
+   ├─ Lines 152-157:  Remove poi_data SSE event sending block
+   └─ Lines 159-164:  Remove map_focus SSE event sending block
+
+5. tools/index.js (2 changes)
+   ├─ Line 12:        Remove focusMap require statement
+   └─ Line 14:        Remove focusMap from ALL_TOOLS array
+
+6. prompts/system-prompt.js (1 change)
+   └─ Line 65:        Remove focus_map tool description and instruction
+
+STATUS: Ready for implementation ✓
+DETAILED GUIDE: MAP_REMOVAL_REFERENCES.md
+
+================================================================================

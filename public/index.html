@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Travel Planner - 旅行规划助手</title>
+  <link rel="stylesheet" href="css/style.css">
+
+</head>
+<body>
+  <!-- 历史面板（左侧抽屉） -->
+  <div id="history-overlay" class="history-overlay" onclick="toggleHistory()"></div>
+  <div id="history-panel" class="history-panel">
+    <div class="history-header">
+      <h2>历史行程</h2>
+      <button onclick="toggleHistory()" class="close-btn">&times;</button>
+    </div>
+    <div id="history-list" class="history-list">
+      <!-- 由 JS 动态渲染 -->
+    </div>
+  </div>
+
+  <!-- 设置面板（侧边抽屉） -->
+  <div id="settings-overlay" class="settings-overlay" onclick="toggleSettings()"></div>
+  <div id="settings-panel" class="settings-panel">
+    <div class="settings-header">
+      <h2>设置</h2>
+      <button onclick="toggleSettings()" class="close-btn">&times;</button>
+    </div>
+    <div class="settings-body">
+      <div class="form-group">
+        <label for="provider">AI 模型提供商</label>
+        <select id="provider">
+          <option value="openai">OpenAI</option>
+          <option value="anthropic">Anthropic (Claude)</option>
+          <option value="deepseek">DeepSeek</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="model">模型</label>
+        <select id="model">
+          <option value="gpt-4o">GPT-4o</option>
+          <option value="gpt-4o-mini">GPT-4o Mini</option>
+          <option value="claude-sonnet-4-20250514">Claude Sonnet 4</option>
+          <option value="claude-opus-4-20250514">Claude Opus 4</option>
+          <option value="deepseek-chat">DeepSeek V3</option>
+          <option value="deepseek-reasoner">DeepSeek R1</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="apiKey">API Key</label>
+        <input type="password" id="apiKey" placeholder="sk-...">
+        <small>Key 仅存储在浏览器本地，不会上传到服务器</small>
+      </div>
+      <div class="form-group">
+        <label for="baseUrl">自定义 Base URL（可选）</label>
+        <input type="text" id="baseUrl" placeholder="留空使用默认地址">
+        <small>如使用代理或第三方兼容 API</small>
+      </div>
+      <button onclick="saveSettings()" class="btn-primary">保存设置</button>
+    </div>
+  </div>
+
+  <!-- 主界面 -->
+  <div class="app-container">
+
+    <!-- 左侧：聊天区 -->
+    <div class="chat-panel">
+      <!-- 顶部栏 -->
+      <header class="top-bar">
+        <div class="top-actions">
+          <button onclick="toggleHistory()" class="btn-icon" title="历史行程">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+          </button>
+        </div>
+        <h1>🌏 AI Travel Planner</h1>
+        <div class="top-actions">
+          <button onclick="clearChat()" class="btn-icon" title="新对话">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+          <button onclick="toggleSettings()" class="btn-icon" title="设置">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <!-- 聊天区域 -->
+      <main id="chat-area" class="chat-area">
+        <div class="welcome-msg">
+          <div class="welcome-card">
+            <span class="welcome-icon">🌍</span>
+            <h2>你好，我是 AI 旅行规划师</h2>
+            <p class="welcome-sub"><span>告诉我你想去哪里，我帮你从零到一规划旅行。</span></p>
+            <div class="welcome-caps">
+              <span class="welcome-cap">✈️ 实时机票</span>
+              <span class="welcome-cap">🌤️ 天气预报</span>
+              <span class="welcome-cap">💱 汇率转换</span>
+              <span class="welcome-cap">📍 景点餐厅</span>
+            </div>
+            <div class="quick-starts">
+              <button class="quick-btn" onclick="sendQuickStart('帮我规划一个7天的日本东京+京都+大阪之旅，想体验文化美食和购物')">🗼 日本东京·京都·大阪</button>
+              <button class="quick-btn" onclick="sendQuickStart('帮我规划一个10天的西欧之旅，包括法国巴黎和意大利罗马，预算2万左右')">🗺️ 西欧巴黎·罗马之旅</button>
+              <button class="quick-btn" onclick="sendQuickStart('我想五一去马来西亚沙巴玩，想体验潜水和雨林，帮我规划一下')">🏝️ 马来西亚沙巴潜水</button>
+              <button class="quick-btn" onclick="sendQuickStart('帮我规划一个5天的泰国清迈+曼谷之旅，喜欢寺庙文化和街头美食')">🍜 泰国清迈·曼谷</button>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      <!-- 输入区域 -->
+      <footer class="input-area">
+        <div class="input-wrapper">
+          <textarea id="msg-input" placeholder="描述你的旅行需求..." rows="1" onkeydown="handleKeyDown(event)"></textarea>
+          <button id="send-btn" onclick="sendMessage()" class="send-btn" title="发送">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+          </button>
+        </div>
+      </footer>
+    </div>
+
+    <!-- 右侧：行程信息面板 -->
+    <div class="itinerary-panel" id="itinerary-panel">
+      <div class="itinerary-header">
+        <span class="itinerary-title">行程概览</span>
+      </div>
+      <div class="itinerary-body" id="itinerary-body">
+        <div class="itinerary-empty">
+          <div class="itinerary-empty-icon">✈️</div>
+          <p>开始对话后，行程信息将在这里汇总</p>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="js/itinerary.js"></script>
+  <script src="js/chat.js"></script>
+</body>
+</html>
