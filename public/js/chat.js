@@ -145,7 +145,8 @@ async function streamChat(settings) {
     const freshWeather = getFreshWeather();
     if (freshWeather.length > 0) bodyPayload.knownWeather = freshWeather;
     try {
-      const tripBookSnapshot = sessionStorage.getItem('tp_tripbook');
+      const tripBookSnapshot = sessionStorage.getItem('tp_tripbook_snapshot')
+                             || sessionStorage.getItem('tp_tripbook');
       if (tripBookSnapshot) bodyPayload.tripBookSnapshot = JSON.parse(tripBookSnapshot);
     } catch {}
 
@@ -310,12 +311,20 @@ function handleSSEEvent(type, data, bubble, toolContainer, getFullText) {
       if (typeof updateItinerary === 'function') updateItinerary(data);
       break;
 
-    case 'tripbook_update':
-      // TripBook 结构化数据更新 — 使用更丰富的面板渲染
-      if (typeof updateFromTripBook === 'function') updateFromTripBook(data);
-      // 保存到 sessionStorage 供下次请求恢复
-      try { sessionStorage.setItem('tp_tripbook', JSON.stringify(data)); } catch {}
+    case 'tripbook_update': {
+      // 提取并存储完整快照（供服务端恢复 TripBook）
+      const snapshot = data._snapshot;
+      if (snapshot) {
+        try { sessionStorage.setItem('tp_tripbook_snapshot', JSON.stringify(snapshot)); } catch {}
+      }
+      // 面板渲染用去掉 _snapshot 的数据（避免 itinerary.js 处理多余字段）
+      const panelData = { ...data };
+      delete panelData._snapshot;
+      if (typeof updateFromTripBook === 'function') updateFromTripBook(panelData);
+      // 同时保存面板数据（供页面刷新时快速恢复面板）
+      try { sessionStorage.setItem('tp_tripbook', JSON.stringify(panelData)); } catch {}
       break;
+    }
 
     case 'quick_replies':
       renderQuickReplies(data, bubble);
@@ -344,7 +353,7 @@ function handleSSEEvent(type, data, bubble, toolContainer, getFullText) {
 }
 
 // 聚合展示的工具（同类多次调用合并为一行）
-const GROUPED_TOOLS = ['search_flights', 'search_hotels'];
+const GROUPED_TOOLS = ['search_flights', 'search_hotels', 'web_search'];
 
 // ============================================================
 // Quick Reply Chips 渲染
@@ -512,23 +521,25 @@ function renderQuickReplies(data, bubble) {
     sendMessage();
   }
 
-  // 插到气泡后面（同一个 message-body 内）
-  bubble.parentElement.appendChild(wrapper);
+  // 嵌入气泡内部，让选项和正文融为一体
+  bubble.appendChild(wrapper);
   scrollToBottom();
 }
 
 function groupLabel(name, total, done) {
-  const icons = { search_flights: '✈️', search_hotels: '🏨' };
-  const nouns = { search_flights: '条航线', search_hotels: '家酒店' };
+  const icons = { search_flights: '✈️', search_hotels: '🏨', web_search: '🔍' };
+  const nouns = { search_flights: '条航线', search_hotels: '家酒店', web_search: '次搜索' };
+  const verbs = { search_flights: '机票', search_hotels: '酒店', web_search: '资料' };
   const icon = icons[name] || '🔍';
   const noun = nouns[name] || '条结果';
+  const verb = verbs[name] || '信息';
   if (done >= total) {
-    return `✅ ${icon} 已查询 ${total} ${noun}`;
+    return `✅ ${icon} 已完成 ${total} ${noun}`;
   }
   if (done === 0) {
-    return `${icon} 正在查询机票…`;
+    return `${icon} 正在查询${verb}…`;
   }
-  return `${icon} 正在查询机票… (${done}/${total})`;
+  return `${icon} 正在查询${verb}… (${done}/${total})`;
 }
 
 function toolLabel(name, args) {
@@ -652,7 +663,8 @@ function saveTripSnapshot() {
   // Capture latest TripBook state
   let tripBookSnapshot = {};
   try {
-    const stored = sessionStorage.getItem('tp_tripbook');
+    const stored = sessionStorage.getItem('tp_tripbook_snapshot')
+                 || sessionStorage.getItem('tp_tripbook');
     if (stored) tripBookSnapshot = JSON.parse(stored);
   } catch {}
   
@@ -704,10 +716,17 @@ function loadTripById(id) {
   // Restore TripBook snapshot if available
   if (trip.tripBookSnapshot && Object.keys(trip.tripBookSnapshot).length > 0) {
     try {
-      sessionStorage.setItem('tp_tripbook', JSON.stringify(trip.tripBookSnapshot));
+      const snap = trip.tripBookSnapshot;
+      // 如果是完整快照（有 constraints 字段），分别设置
+      if (snap.constraints || snap.itinerary) {
+        sessionStorage.setItem('tp_tripbook_snapshot', JSON.stringify(snap));
+      } else {
+        // 旧格式面板数据，直接用
+        sessionStorage.setItem('tp_tripbook', JSON.stringify(snap));
+      }
       // Update itinerary panel from restored snapshot
       if (typeof updateFromTripBook === 'function') {
-        updateFromTripBook(trip.tripBookSnapshot);
+        updateFromTripBook(snap);
       }
     } catch (e) {
       console.warn('Failed to restore TripBook snapshot:', e);
@@ -864,7 +883,10 @@ function clearChat() {
   // 同步清空行程面板
   if (typeof clearItinerary === 'function') clearItinerary();
   // 清空 TripBook 缓存
-  try { sessionStorage.removeItem('tp_tripbook'); } catch {}
+  try {
+    sessionStorage.removeItem('tp_tripbook');
+    sessionStorage.removeItem('tp_tripbook_snapshot');
+  } catch {}
 }
 
 // ============================================================

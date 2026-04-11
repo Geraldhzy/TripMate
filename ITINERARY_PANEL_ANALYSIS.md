@@ -1,714 +1,408 @@
-# AI Travel Planner — Itinerary Panel Rendering System Analysis
+# 🎯 AI Travel Planner — Itinerary Panel Implementation Analysis
 
-## Executive Summary
-
-The itinerary panel is a **dual-column React-less rendered system** that displays trip planning information in real-time as an AI agent builds out the itinerary. It uses a **server-side TripBook** class as the single source of truth, which converts to panel data via `toPanelData()` and streams updates to the frontend via SSE `tripbook_update` events.
-
----
-
-## 1. ARCHITECTURE OVERVIEW
-
-### High-Level Flow
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│ Browser: itinerary.js (Client State)                        │
-│ ┌────────────────────────────────────────────────────────┐  │
-│ │ itineraryState = {                                      │  │
-│ │   destination, departCity, dates, days, people, budget,│  │
-│ │   preferences, phase, phaseLabel,                       │  │
-│ │   flights[], hotels[], weather,                         │  │
-│ │   route[], daysPlan[], budgetSummary                   │  │
-│ │ }                                                       │  │
-│ │                                                         │  │
-│ │ expandedDays = Set (which day cards are open)          │  │
-│ └────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-                           ↑↓ updateFromTripBook()
-                           (SSE tripbook_update event)
-┌─────────────────────────────────────────────────────────────┐
-│ Server: models/trip-book.js (TripBook Class)                │
-│ ┌────────────────────────────────────────────────────────┐  │
-│ │ Layer 1: Knowledge Refs (destination keys, activity)   │  │
-│ │ Layer 2: Dynamic Data (weather, rates, quotes, etc)    │  │
-│ │ Layer 3: User Constraints (destination, dates, etc)    │  │
-│ │ Layer 4: Itinerary (phase, route, days[], budget)      │  │
-│ │                                                         │  │
-│ │ toPanelData() → flattened object for frontend          │  │
-│ └────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### Data Flow: AI → TripBook → Frontend
-
-1. **AI calls `update_trip_info` tool** with structured updates
-   - Contains: `constraints`, `phase`, `itinerary` (route/days/budgetSummary)
-
-2. **Server-side `runTool()` receives call**
-   - Calls `tripBook.updateConstraints()`, `tripBook.updatePhase()`, `tripBook.updateItinerary()`
-   - Sends SSE event: `sendSSE('tripbook_update', tripBook.toPanelData())`
-
-3. **Frontend receives SSE event in chat.js**
-   - Line 313-318: `handleSSEEvent('tripbook_update', data)`
-   - Calls `updateFromTripBook(data)` from itinerary.js
-
-4. **itinerary.js updates state and renders**
-   - `updateFromTripBook()` merges data into `itineraryState`
-   - Calls `renderItinerary()` → `renderDaysPlan()` → `renderTimeline()`
+**Date:** 2026/04/12  
+**Scope:** Complete exploration of itinerary panel rendering, data flow, and CSS styling  
+**Purpose:** Major redesign preparation
 
 ---
 
-## 2. DATA STRUCTURES
+## 📋 Table of Contents
+1. [itineraryState Structure](#1-itinerarystate-structure)
+2. [Core Functions & Flow](#2-core-functions--flow)
+3. [Rendering Architecture](#3-rendering-architecture)
+4. [CSS Styling System](#4-css-styling-system)
+5. [Data Integration with TripBook](#5-data-integration-with-tripbook)
+6. [HTML Structure](#6-html-structure)
+7. [Design Notes & Insights](#7-design-notes--insights)
 
-### 2.1 `itineraryState` (Frontend)
+---
 
-Located in `public/js/itinerary.js`, lines 6-23:
+## 1. itineraryState Structure
 
+**Location:** `public/js/itinerary.js`, lines 6-24
+
+### Full Object Definition
 ```javascript
 let itineraryState = {
-  // Basic constraints
-  destination: '',        // e.g., "日本 东京·京都·大阪"
-  departCity: '',         // e.g., "北京"
-  dates: '',              // e.g., "2024-05-01 ~ 2024-05-07"
-  days: 0,                // e.g., 7
-  people: 0,              // e.g., 2
-  budget: '',             // e.g., "15000"
-  preferences: [],        // e.g., ["美食", "文化", "购物"]
+  destination: '',           // String: destination name, e.g., "日本（东京·京都·大阪）"
+  departCity: '',            // String: departure city name
+  dates: '',                 // String: formatted date range, e.g., "2026-05-01 ~ 2026-05-08"
+  days: 0,                   // Number: total days of trip
+  people: 0,                 // Number: number of travelers
+  budget: '',                // String: budget amount with currency, e.g., "¥20000"
+  preferences: [],           // Array<String>: travel preferences/tags
+  phase: 0,                  // Number: 0-4, current planning phase
+  phaseLabel: '',            // String: human-readable phase label
+  flights: [],               // Array<Object>: flight bookings
+  hotels: [],                // Array<Object>: hotel bookings
+  weather: null,             // Object | null: single city weather or null
+  weatherList: null,         // Array<Object> | null: multi-city weather data
   
-  // Progress
-  phase: 0,               // 0-4 (mapped from server's 0-7)
-  phaseLabel: '',         // e.g., "规划行程"
-  
-  // Bookings
-  flights: [],            // [{ route, airline, price, time, status }]
-  hotels: [],             // [{ name, city, price, nights, status }]
-  weather: null,          // { city, temp_c, description }
-  
-  // TripBook extended
-  route: [],              // ["东京", "京都", "大阪"]
-  daysPlan: [],           // MAIN: detailed daily itinerary
-  budgetSummary: null     // MAIN: budget breakdown
+  // ── TripBook Extension Fields (from Layer 4: Itinerary) ──
+  route: [],                 // Array<String>: list of cities in order
+  daysPlan: [],              // Array<DayPlan>: detailed daily itinerary
+  budgetSummary: null        // Object | null: budget breakdown with totals
 };
 ```
 
-### 2.2 `daysPlan` Structure (The Heart)
-
-**When segments DO exist** (expanded day view):
-
+### Phase Mapping
 ```javascript
-[
-  {
-    day: 1,
-    date: "2024-05-01",
-    city: "东京",
-    title: "到达东京，入住酒店",
-    segments: [
-      {
-        time: "14:30",
-        title: "飞机降落成田机场",
-        location: "成田机场，东京",
-        duration: "需转车~60分钟到市区",
-        transport: "Narita Express 特快列车",
-        transportTime: "60分钟",
-        notes: "建议购买 N'EX 通票",
-        type: "transport"  // activity|meal|transport|hotel
-      },
-      {
-        time: "16:00",
-        title: "办理入住并休息",
-        location: "酒店",
-        duration: "自由时间",
-        transport: "",
-        notes: "可在酒店附近走走",
-        type: "hotel"
-      },
-      {
-        time: "19:00",
-        title: "晚餐 - 尝试拉面",
-        location: "新宿区",
-        duration: "1小时",
-        transport: "",
-        notes: "",
-        type: "meal"
-      }
-    ]
-  },
-  ...
-]
+const PHASE_LABELS = [
+  '',                // 0 = Unstarted
+  '需求确认',        // 1 = Requirements confirmed
+  '大交通确认',      // 2 = Transportation confirmed
+  '规划行程',        // 3 = Itinerary planning
+  '行程总结'         // 4 = Trip summary
+];
+
+// Internal 7-phase → Display 4-phase mapping (mapPhase())
+// Internal 0 → Display 0
+// Internal 1 → Display 1
+// Internal 2 → Display 2
+// Internal 3-4 → Display 3
+// Internal 5+ → Display 4
 ```
-
-**When segments DON'T exist** (collapsed day view):
-
-```javascript
-{
-  day: 1,
-  date: "2024-05-01",
-  city: "东京",
-  title: "到达东京，入住酒店",
-  segments: []  // or undefined/null
-}
-```
-
-### 2.3 `budgetSummary` Structure
-
-```javascript
-{
-  flights: { label: "机票", amount_cny: 3500 },
-  hotels: { label: "酒店", amount_cny: 4200 },
-  attractions: { label: "景点门票", amount_cny: 1200 },
-  meals: { label: "餐饮", amount_cny: 2000 },
-  transport: { label: "交通", amount_cny: 800 },
-  misc: { label: "其他", amount_cny: 500 },
-  total_cny: 12200,
-  budget_cny: 15000,           // User's budget
-  remaining_cny: 2800          // or auto-computed
-}
-```
-
-### 2.4 Server-side TripBook.itinerary (models/trip-book.js, lines 56-63)
-
-```javascript
-this.itinerary = {
-  phase: 0,                     // 0-7 internal stages
-  phaseLabel: '',               // Auto from PHASE_LABELS
-  route: [],                    // City sequence
-  days: [],                      // Full day objects with segments
-  budgetSummary: null,          // Breakdown
-  reminders: []                 // "出发前3天完成..."
-};
-```
-
-**Phase Mapping** (itinerary.js line 36-43):
-- Server 0-1 → Client 1 (需求确认)
-- Server 2-3 → Client 2 (规划行程)
-- Server 4-5 → Client 3 (完善细节)
-- Server 6-7 → Client 4 (预算总结)
 
 ---
 
-## 3. RENDERING PIPELINE
+## 2. Core Functions & Flow
 
-### 3.1 Main Entry: `renderItinerary()` (Lines 110-231)
+### 2.1 Main Entry Points
 
-**Decision Tree:**
-```
-renderItinerary()
-  ↓
-  Check: hasData? (any of destination/dates/budget/etc)
-  ├─ If NO → return (don't render empty)
-  └─ If YES ↓
-     
-     Check: hasRightCol? (route.length > 0 OR daysPlan.length > 0 OR budgetSummary)
-     ├─ If YES (Two-column layout):
-     │   ├─ Build left column (constraints: destination/dates/budget/phase/flights/hotels)
-     │   ├─ Build right column:
-     │   │   ├─ renderRoute(route)
-     │   │   ├─ renderDaysPlan(daysPlan)
-     │   │   └─ renderBudgetSummary(budgetSummary)
-     │   └─ Assemble: `<div class="itin-two-col"><div class="itin-col-left">...
-     │
-     └─ If NO (Single column):
-        └─ Just render left column (leftHtml)
-```
+#### `updateItinerary(data)` — Lines 94-127
+- Merges data incrementally
+- Appends flights/hotels
+- Maps phase number
+- Calls renderItinerary()
 
-### 3.2 Left Column: Constraints (Lines 126-198)
+#### `updateFromTripBook(data)` — Lines 404-453
+- Handles both flat and full snapshot formats
+- **REPLACES** (not appends) flights/hotels
+- Supports multi-city weather
+- Calls renderItinerary()
 
-**Renders in order:**
-1. Destination (📍)
-2. Depart City (🛫) — **editable**
-3. Dates + Days (📅) — **editable**
-4. People (👥) — **editable**
-5. Budget (💰) — **editable**
-6. Preferences (🏷️) — tags
-7. Weather (🌤️)
-8. Phase progress (📊) — 4-segment bar
-9. Flights section (✈️)
-10. Hotels section (🏨)
+#### `clearItinerary()` — Lines 132-151
+- Resets all state to empty
+- Renders empty state HTML
 
-**Editable fields** use `buildRow(icon, label, html, editableField)`:
-- Can click pencil icon to inline-edit
-- Triggers message like "出发城市改为XXX"
+### 2.2 Rendering Pipeline
 
-### 3.3 Right Column: `renderDaysPlan()` (Lines 377-415)
+**renderItinerary()** → **renderDaysPlan()** → **renderTimeline()**
+                    → **renderBudgetSummary()**
 
-**For each day in daysPlan:**
+### 2.3 Key Data Converters
 
-```javascript
-if (hasSegments) {
-  // Expanded view: render timeline
-  html += `<div class="itin-day-detail">` + renderTimeline(segments) + `</div>`
-} else {
-  // Collapsed view: just show title summary
-  html += `<div class="itin-day-body">${title}</div>`
-}
-```
+#### `convertSnapshotToPanelData(snap)` — Lines 343-399
+Transforms TripBook 4-layer structure to flat panel data
 
-**Key logic (lines 387-388):**
-```javascript
-const hasSegments = d.segments && d.segments.length > 0;
-```
-
-- **If `segments` exists and has items**: Render detailed timeline (clickable)
-- **If `segments` is empty/null**: Show collapsed summary text only
-
-### 3.4 Timeline Rendering: `renderTimeline()` (Lines 420-469)
-
-**Renders for each segment:**
-
-```
-Timeline-item grid (3 columns):
-  [Time] [Dot+Line] [Content]
-
-For each segment:
-  ├─ Time: "14:30" (right-aligned)
-  ├─ Dot: colored by type (activity=cyan, meal=amber, transport=gray, hotel=purple)
-  ├─ Line: gray vertical line connecting to next item
-  └─ Content:
-     ├─ Title: bold
-     ├─ Meta: "📍 location · duration · notes"
-     └─ [Optional] Transport between items:
-        └─ "🚶 Narita Express · 60分钟"
-```
-
-**Type-based dot colors** (lines 427-429):
-```javascript
-const dotClass = seg.type === 'meal' ? 'meal' :      // #f59e0b (amber)
-                 seg.type === 'transport' ? 'transport' : // #64748b (gray)
-                 seg.type === 'hotel' ? 'hotel' : '';      // #8b5cf6 (purple)
-                 // default: #0891b2 (cyan)
-```
-
-**Transport connectors** (lines 453-464):
-- If segment has `seg.transport` and is NOT the last segment:
-  - Renders between current activity and next activity
-  - Shows icon 🚶 with transport method and time
+#### `mapPhase(raw)` — Lines 83-89
+Maps internal 7-phase to display 4-phase
 
 ---
 
-## 4. CSS CLASSES & STYLING
+## 3. Rendering Architecture
 
-### 4.1 Two-Column Layout
-
-```css
-/* style.css lines 402-408 */
-.itin-two-col {
-  display: grid;
-  grid-template-columns: 2fr 3fr;  /* Left 40%, Right 60% */
-  gap: 12px;
-  height: 100%;
-}
-.itin-col-left, .itin-col-right {
-  overflow-y: auto;              /* Independent scrolling */
-  min-height: 0;
-}
+### 3.1 Single-Column Vertical Layout Order
+```
+itinerary-body
+├── itin-dest-title (gradient)
+├── itin-route-bar (with arrows)
+├── itin-info-grid (2-column: dates, people, budget, departure)
+├── itin-tags-bar (preference tags)
+├── itin-weather-bar (multi-city support)
+├── itin-progress-bar (4-segment phase indicator)
+├── ✈️ Flights Section
+│   ├── itin-section-title
+│   └── itin-booking-card[]
+├── 🏨 Hotels Section
+│   ├── itin-section-title
+│   └── itin-booking-card[]
+├── 📋 Daily Itinerary
+│   ├── itin-section-header (with toggle-all button)
+│   └── itin-day-card[] (collapsible)
+│       ├── itin-day-header
+│       ├── itin-day-subtitle
+│       └── itin-day-detail (hidden, with timeline)
+│           └── timeline[]
+└── 💰 Budget Summary
+    └── itin-budget
+        ├── budget-item[]
+        ├── budget-total
+        └── budget-ok|budget-over
 ```
 
-### 4.2 Day Card Classes
+### 3.2 Key Rendering Functions
 
-```
-.itin-day-card               → bordered container
-  ├─ .itin-day-header      → clickable header row
-  │  ├─ .day-num           → "Day 1" badge (#0891b2)
-  │  ├─ .day-date          → "2024-05-01" (gray)
-  │  ├─ .day-city          → "东京" (cyan, bold)
-  │  ├─ .day-title         → truncated text
-  │  └─ .day-toggle        → "▶" arrow (rotates 90° when expanded)
-  │
-  └─ .itin-day-detail      → hidden by default
-     └─ (shown when .itin-day-card.expanded)
-        └─ .timeline        → time grid layout
-```
+#### `renderItinerary()` — Lines 156-290
+Main orchestrator generating entire panel HTML
 
-**Toggle logic** (lines 309-311):
-```css
-.itin-day-card.expanded .itin-day-detail {
-  display: block;
-}
-.itin-day-card.expanded .day-toggle {
-  transform: rotate(90deg);
-}
-```
+#### `renderDaysPlan(daysPlan)` — Lines 498-543
+Renders collapsible daily cards with toggle UI
+
+#### `renderTimeline(segments)` — Lines 548-597
+3-column grid layout for activities (time|dot|content)
+
+#### `renderBudgetSummary(summary)` — Lines 602-647
+Category ordering with color-coded remaining/overage
+
+---
+
+## 4. CSS Styling System
+
+### 4.1 Theme Variables
+Lines 8-40: Arctic Breeze (冷静克制的蓝灰色系)
+
+**Key Colors:**
+- Primary: #3b82f6 (sky blue)
+- Deep: #0f172a (dark slate for background)
+- Text Light: #93c5fd (light blue for dark bg)
+- Success: #059669 (green)
+- Warning: #d97706 (orange)
+
+### 4.2 Component Classes
+
+| Component | Classes | Purpose |
+|-----------|---------|---------|
+| Panel | `.itinerary-panel`, `.itinerary-body` | Dark side panel (360-580px) |
+| Title | `.itin-dest-title` | Gradient text header |
+| Route | `.itin-route-bar`, `.route-stop`, `.route-arrow` | City sequence display |
+| Info Grid | `.itin-info-grid`, `.itin-info-item`, `.itin-edit-btn` | 2-col editable metadata |
+| Tags | `.itin-tags-bar`, `.itin-tag` | Inline preference pills |
+| Weather | `.itin-weather-bar` | Multi-city weather (translated) |
+| Progress | `.itin-progress-bar`, `.itin-progress-seg` | 4-segment phase indicator |
+| Bookings | `.itin-booking-card` | Flight/hotel summary cards |
+| Days | `.itin-day-card`, `.itin-day-header`, `.day-toggle` | Collapsible day cards |
+| Timeline | `.timeline-*`, `.timeline-dot`, `.timeline-line` | Activity timeline (3-col grid) |
+| Timeline Dots | `.timeline-dot.meal`, `.timeline-dot.transport`, `.timeline-dot.hotel` | Color-coded by type |
+| Budget | `.itin-budget`, `.budget-item`, `.budget-total` | Line items with formatting |
+| Budget Status | `.budget-ok`, `.budget-over` | Green/red remaining amount |
 
 ### 4.3 Timeline Grid Layout
-
 ```css
-/* style.css lines 333-339 */
-.timeline-item {
-  display: grid;
-  grid-template-columns: 44px 14px 1fr;  /* Time | Dot | Content */
-  gap: 4px;
-  align-items: start;
-  min-height: 28px;
-}
+grid-template-columns: 44px 14px 1fr;  /* time | dot | content */
 ```
+- **Column 1 (44px):** Right-aligned time
+- **Column 2 (14px):** Centered dot + vertical line
+- **Column 3 (1fr):** Activity title + metadata
 
-### 4.4 Color Scheme (Dark theme, lines 69, 140-142)
+### 4.4 Dot Type Colors
+- Default (activity): #3b82f6 (blue)
+- Meal: #f59e0b (orange)
+- Transport: #64748b (gray)
+- Hotel: #a78bfa (purple)
 
-```
-Background: #0f172a (dark navy)
-Text: #e2e8f0 (light gray)
-Secondary: #64748b (medium gray)
-Accent: #0891b2 (cyan)
-Highlights: #22d3ee (bright cyan)
-```
+### 4.5 Interactive Features
+- Hover expand info items
+- Edit button appears on hover
+- Inline input field for direct editing
+- Day card toggle with arrow rotation
+- Expandable all/collapse all button
 
 ---
 
-## 5. EXPANSION/COLLAPSE STATE MANAGEMENT
+## 5. Data Integration with TripBook
 
-### 5.1 Client-side State
+### 5.1 TripBook 4-Layer Structure
 
+```
+Layer 1: Static Knowledge (knowledgeRefs, activityRefs)
+  └─ Used for cross-trip context (not displayed in panel)
+
+Layer 2: Dynamic Data (weather, exchangeRates, flightQuotes, hotelQuotes, webSearches)
+  └─ Flights: route, airline, price_cny/price_usd, duration, stops, status
+  └─ Hotels: name, city, checkin, checkout, nights, price_per_night_usd, rating
+  └─ Weather: city, current{ temp_c, description }, forecast, _meta{ fetched_at, ttl }
+
+Layer 3: User Constraints (destination, departCity, dates, people, budget, preferences)
+  └─ Each has: value, confirmed, confirmed_at
+  └─ Optional: cities[], airports[], days, per_person, tags[], notes
+
+Layer 4: Itinerary (phase 0-7, route[], days[], budgetSummary, reminders)
+  └─ Days: day, date, city, title, segments[]
+  └─ Segments: time, title/activity, location, duration, transport, transportTime, notes, type
+```
+
+### 5.2 Export Function: `toPanelData()`
+Lines 430-494 in trip-book.js
+
+**Transforms:**
+- Multi-city weather → both `weather` (first) and `weatherList` (all)
+- Flights/hotels → formatted with prices
+- Days/segments → flattened with type inference
+- Budget → total + remaining/overage calculation
+
+### 5.3 SSE Integration
+
+**Event: `tripbook_update`**
 ```javascript
-// itinerary.js lines 25-26
-const expandedDays = new Set();  // Stores day numbers that are expanded
-
-// Example: { 1, 3 } means days 1 and 3 are expanded
+sendSSE('tripbook_update', {
+  ...tripBook.toPanelData(),        // Flat display data
+  _snapshot: tripBook.toJSON()      // Full structure for persistence
+});
 ```
 
-### 5.2 Toggle Function (Lines 361-372)
-
-```javascript
-function toggleDay(dayNum) {
-  if (expandedDays.has(dayNum)) {
-    expandedDays.delete(dayNum);
-  } else {
-    expandedDays.add(dayNum);
-  }
-  
-  // Update DOM class (no full re-render!)
-  const card = document.getElementById(`day-card-${dayNum}`);
-  if (card) {
-    card.classList.toggle('expanded', expandedDays.has(dayNum));
-  }
-}
-```
-
-**Key insight**: Only the CSS class is toggled. `renderItinerary()` is NOT called again, so expansion state persists.
-
-### 5.3 Check at Render Time (Lines 382-383)
-
-```javascript
-for (const d of daysPlan) {
-  const isExpanded = expandedDays.has(d.day);
-  const expandedClass = isExpanded ? ' expanded' : '';
-  
-  html += `<div class="itin-day-card${expandedClass}" id="day-card-${d.day}">
-```
-
-If user has previously expanded day 1, and `renderItinerary()` is called again with new data, day 1 **stays expanded** because `expandedDays.has(1)` is still true.
+Triggered when `update_trip_info` tool executes (server.js lines 269-273)
 
 ---
 
-## 6. DATA UPDATE FLOWS
+## 6. HTML Structure
 
-### 6.1 Via `updateFromTripBook()` (Lines 299-340)
+**Location:** `public/index.html`, lines 122-132
 
-**Called when**: SSE event `tripbook_update` arrives
+```html
+<div class="itinerary-panel" id="itinerary-panel">
+  <div class="itinerary-header">
+    <span class="itinerary-title">行程概览</span>
+  </div>
+  <div class="itinerary-body" id="itinerary-body">
+    <!-- Dynamically populated by itinerary.js -->
+  </div>
+</div>
+```
 
-**Process**:
-1. Receives flattened panel data from `tripBook.toPanelData()`
-2. Replaces entire arrays: `flights`, `hotels`, `preferences`
-3. Sets scalars: `destination`, `dates`, `days`, etc.
-4. Sets complex objects: `route[]`, `daysPlan[]`, `budgetSummary`
-5. Calls `renderItinerary()` to re-render everything
-
-**Key difference from `updateItinerary()`**:
-- This is the PRIMARY update path for TripBook-driven data
-- Replaces state, doesn't merge incrementally
-- Line 332: `itineraryState.flights = data.flights;` (full replacement)
-
-### 6.2 Via `updateItinerary()` (Lines 48-81)
-
-**Called when**: Other SSE events arrive (weather, flights, hotels)
-
-**Process**:
-1. Merges data incrementally into `itineraryState`
-2. Pushes new items to arrays instead of replacing
-3. Line 70: `itineraryState.flights.push(...data.flights);`
-4. Calls `renderItinerary()`
-
-### 6.3 Comparison Table
-
-| Aspect | updateItinerary | updateFromTripBook |
-|--------|-----------------|-------------------|
-| **Source** | Generic SSE events | TripBook data |
-| **Strategy** | Incremental merge (push) | Full replacement |
-| **flights[]** | Push new items | Replace entire array |
-| **daysPlan[]** | N/A (only in TripBook) | Replace entire array |
-| **When called** | weather, exchange-rate SSE events | update_trip_info tool → tripbook_update SSE |
-| **Data richness** | Basic fields | Full structured itinerary |
+All content inserted via JavaScript into `#itinerary-body`
 
 ---
 
-## 7. SERVER-SIDE: TripBook.toPanelData() (trip-book.js Lines 426-486)
+## 7. Design Notes & Insights
 
-### 7.1 Conversion Logic
+### 7.1 Architectural Decisions
 
-```javascript
-toPanelData() {
-  return {
-    // Scale-down constraint fields to strings
-    destination: "${value} ${cities.join('·')}",
-    departCity: c.departCity?.value || '',
-    dates: c.dates?.start ? `${start} ~ ${end}` : '',
-    days: c.dates?.days || 0,
-    people: c.people?.count || 0,
-    budget: c.budget?.value || '',
-    preferences: c.preferences?.tags || [],
-    phase: it.phase,
-    phaseLabel: it.phaseLabel,
-    
-    // Direct passthrough
-    route: it.route,
-    budgetSummary: it.budgetSummary,
-    
-    // Flatten flight quotes to simple objects
-    flights: flightQuotes
-      .filter(f => f.status !== 'quoted' || count <= 5)
-      .map(f => ({
-        route: f.route,
-        airline: f.airline,
-        price: f.price_cny ? `¥${f.price_cny}` : `$${f.price_usd}`,
-        time: f.duration,
-        status: f.status
-      })),
-    
-    // Flatten hotel quotes
-    hotels: hotelQuotes
-      .filter(h => h.status !== 'quoted' || count <= 5)
-      .map(h => ({
-        name: h.name,
-        city: h.city,
-        price: h.price_total_cny ? `¥${h.price_total_cny}` : `$${h.price_per_night_usd}/晚`,
-        nights: h.nights,
-        status: h.status
-      })),
-    
-    // Weather: pick first entry
-    weather: weatherEntries[0] || null,
-    
-    // Map days with segments transformation
-    daysPlan: it.days.map(d => ({
-      day: d.day,
-      date: d.date,
-      city: d.city,
-      title: d.title,
-      segments: (d.segments || []).map(seg => ({
-        time: seg.time,
-        title: seg.title || seg.activity,
-        location: seg.location,
-        duration: seg.duration,
-        transport: seg.transport,
-        transportTime: seg.transportTime,
-        notes: seg.notes,
-        type: seg.type || 'activity'
-      }))
-    }))
-  };
-}
-```
+1. **Single-Column Layout**
+   - Fits narrow 360-580px panel width
+   - Scrollable content area
+   - Maintains reading order
 
-### 7.2 Key Transforms
+2. **Dual Update Modes**
+   - `updateItinerary()`: Appends (for incremental messages)
+   - `updateFromTripBook()`: Replaces (for full snapshots)
 
-| TripBook → Panel | Notes |
-|------------------|-------|
-| `constraints.destination.cities[]` | Joined as "东京·京都·大阪" |
-| `flightQuotes` | Filtered (quoted removed unless ≤5 total) + price formatted |
-| `hotelQuotes` | Same filtering + price formatted |
-| `dynamic.weather[0]` | Pick first city's weather |
-| `itinerary.days[].segments[]` | Map fields, default `type: 'activity'` |
+3. **Phase Abstraction**
+   - Internal: 0-7 (backend flexibility)
+   - Display: 0-4 (user simplicity)
+   - Normalized via `mapPhase()`
+
+4. **Translation Layers**
+   - English API responses → Chinese display
+   - 70+ weather terms mapped
+   - 70+ city names mapped
+
+5. **Expandable State**
+   - `expandedDays` Set tracks UI state only
+   - CSS-based toggle (no full re-render)
+   - Lost on page reload (intentional)
+
+### 7.2 Performance Optimizations
+
+- No virtual scrolling (small dataset)
+- Class-based CSS toggle for day expansion
+- All user content escaped via `escItinHtml()`
+- Cached translation dictionaries
+
+### 7.3 Extensibility Points
+
+1. Add new sections before final `body.innerHTML = html`
+2. Extend budget categories via `knownOrder` array
+3. Add weather translations to `WEATHER_ZH` object
+4. Add timeline dot types with CSS classes + type check
+5. Modify field labels in `startInlineEdit()` mapping
+
+### 7.4 Known Limitations
+
+- Expand state not persisted
+- Fixed 2-column info grid
+- Budget categories hardcoded
+- No drag-and-drop reordering
+- No export functionality (PDF, calendar)
+- Multi-city weather: only first used in `weather` field
+
+### 7.5 CSS Class Naming
+
+Prefix `.itin-*` to avoid conflicts:
+- `.itin-section-*`: Section structure
+- `.itin-booking-*`: Flight/hotel cards
+- `.itin-day-*`: Daily itinerary
+- `.itin-progress-*`: Phase indicator
+- `.timeline-*`: Activity timeline
+- `.budget-*`: Budget items
+- `.day-*`: Day header elements
+
+### 7.6 Opportunities for Enhancement
+
+1. Locale-aware date formatting
+2. Markdown/rich formatting in timeline meta
+3. AI-configurable budget categories from backend
+4. Type inference from activity titles (e.g., "dinner" → meal)
+5. Drag-and-drop activity reordering
+6. Export to PDF/calendar integration
+7. Persist expand state to localStorage
+8. Animate transitions between phases
 
 ---
 
-## 8. HOW SEGMENTS ARE POPULATED
+## 📊 Complete CSS Classes Reference
 
-### 8.1 By AI Tool: `update_trip_info`
+### Panel Structure (12 classes)
+- `.itinerary-panel`, `.itinerary-header`, `.itinerary-title`, `.itinerary-body`, `.itinerary-empty`, `.itinerary-empty-icon`
 
-AI calls tool with payload:
-```json
-{
-  "updates": {
-    "itinerary": {
-      "phase": 5,
-      "days": [
-        {
-          "day": 1,
-          "date": "2024-05-01",
-          "city": "东京",
-          "title": "到达东京",
-          "segments": [
-            {
-              "time": "14:30",
-              "title": "飞机降落",
-              "location": "成田机场",
-              "type": "transport",
-              "transport": "机场快线",
-              "transportTime": "60分钟"
-            },
-            ...
-          ]
-        }
-      ]
-    }
-  }
-}
-```
+### Destination & Route (4 classes)
+- `.itin-dest-title`, `.itin-route-bar`, `.route-stop`, `.route-arrow`
 
-### 8.2 In TripBook.updateItinerary() (trip-book.js Lines 201-235)
+### Info Grid (6 classes)
+- `.itin-info-grid`, `.itin-info-item`, `.itin-icon`, `.itin-info-text`, `.itin-edit-btn`, `.itin-inline-input`
 
-```javascript
-updateItinerary(delta) {
-  if (Array.isArray(delta.days)) {
-    for (const newDay of delta.days) {
-      const idx = this.itinerary.days.findIndex(d => d.day === newDay.day);
-      if (idx >= 0) {
-        this.itinerary.days[idx] = { ...old, ...new };  // Merge
-      } else {
-        this.itinerary.days.push(newDay);               // Add new
-      }
-    }
-    this.itinerary.days.sort((a, b) => a.day - b.day); // Keep sorted
-  }
-}
-```
+### Tags & Weather (4 classes)
+- `.itin-tags-bar`, `.itin-tag`, `.itin-weather-bar`, `.itin-weather-item`
 
-### 8.3 When Segments EXIST vs DON'T
+### Progress (5 classes)
+- `.itin-progress-bar`, `.itin-progress-text`, `.itin-progress`, `.itin-progress-seg`, `.itin-progress-seg.done`, `.itin-progress-seg.active`
 
-**EXIST (detailed timeline shows)**:
-- AI has called `update_trip_info` with day object containing `segments[]` array
-- `d.segments && d.segments.length > 0` is true
-- `renderTimeline(d.segments)` is called
-- User sees expandable day with timeline details
+### Booking Cards (6 classes)
+- `.itin-section-title`, `.itin-section-header`, `.itin-toggle-all`, `.itin-booking-card`, `.itin-booking-title`, `.itin-booking-detail`
 
-**DON'T EXIST (collapsed summary shows)**:
-- Day object has no `segments` field, or it's empty array
-- `hasSegments = false` (line 387)
-- Falls into `else` branch (line 403-409)
-- Shows only `d.title` text as summary
-- User sees compact day card with just the title
+### Day Cards (9 classes)
+- `.itin-day-card`, `.itin-day-card.expanded`, `.itin-day-card.has-segments`, `.itin-day-header`, `.itin-day-subtitle`, `.itin-day-detail`, `.day-num`, `.day-date`, `.day-city`, `.day-toggle`
+
+### Timeline (14 classes)
+- `.timeline`, `.timeline-item`, `.timeline-time`, `.timeline-dot-col`, `.timeline-dot`, `.timeline-dot.meal`, `.timeline-dot.transport`, `.timeline-dot.hotel`, `.timeline-line`, `.timeline-content`, `.timeline-title`, `.timeline-meta`, `.timeline-transport`, `.transport-info`
+
+### Budget (8 classes)
+- `.itin-budget`, `.budget-item`, `.budget-label`, `.budget-amount`, `.budget-total`, `.budget-ok`, `.budget-over`
+
+**Total: 68 unique CSS classes**
 
 ---
 
-## 9. INLINE EDITING
+## 🔄 Data Flow Summary
 
-### 9.1 Editable Fields
-
-Only these fields support inline editing (with pencil button):
-- `departCity` (departure city)
-- `dates` (travel dates)
-- `people` (number of people)
-- `budget` (budget)
-
-### 9.2 Flow (Lines 251-294)
-
-1. User clicks pencil icon on a row
-2. `startInlineEdit(btn)` called
-3. `itin-value` becomes `<input class="itin-inline-input">`
-4. User types and presses Enter/Tab (blur)
-5. `commitEdit()` fires:
-   - Gets new value from input
-   - Constructs message: `"${label}改为${newVal}"`
-   - Sets `#msg-input.value = promptText`
-   - Dispatches input event
-   - Calls `renderItinerary()` to refresh
-
-**Result**: Message sent to AI as if user typed it
-
----
-
-## 10. RESPONSIVE BEHAVIOR
-
-### 10.1 Two-Column → One-Column (Lines 1082-1085)
-
-```css
-@media (max-width: 1200px) {
-  .itin-two-col { grid-template-columns: 1fr; }  /* Stack vertically */
-}
-
-@media (max-width: 900px) {
-  .itinerary-panel { display: none; }  /* Hide entirely */
-}
 ```
-
-### 10.2 Panel Width
-
-```css
-.itinerary-panel {
-  width: clamp(360px, 30vw, 580px);  /* Min 360px, Max 580px, 30% of viewport */
-}
+TripBook Instance
+    ↓
+toPanelData() → Flat Panel Data
+    ↓
+Server: tripbook_update SSE
+    ↓
+Client: updateFromTripBook()
+    ↓
+itineraryState updated
+    ↓
+renderItinerary() + renderDaysPlan() + renderTimeline() + renderBudgetSummary()
+    ↓
+DOM #itinerary-body updated
+    ↓
+CSS styling applied (Arctic Breeze theme)
+    ↓
+User sees rendered panel
 ```
 
 ---
 
-## 11. CURRENT LIMITATIONS & GAPS
+**End of Thorough Analysis**
 
-### 11.1 Data Structure Gaps
-
-1. **`daysPlan` flexibility**: No schema enforcement
-   - AI can send arbitrary field names
-   - Frontend maps `seg.title || seg.activity` (fallback)
-   - No validation on segment types
-
-2. **Segment `transport` field positioning**:
-   - Rendered as "connector" between activities
-   - But data structure doesn't explicitly model "between" relationship
-   - Relies on array index position + `!isLast` check
-
-3. **No segment IDs**: Segments lack unique identifiers
-   - Can't target specific segments for updates
-   - Full array replacement on every day change
-
-### 11.2 Rendering Issues
-
-1. **No incremental segment updates**: 
-   - When AI adds one segment to a day, entire day is re-rendered
-   - `renderItinerary()` clears and rebuilds all HTML
-
-2. **Expansion state loss on full re-render**:
-   - Currently preserved via `expandedDays` Set
-   - But if day object structure changes, state might mismatch
-
-3. **No skeleton/loading states**:
-   - Timeline just appears when data arrives
-   - No progressive rendering as segments are added
-
-### 11.3 UX Issues
-
-1. **Collapsed vs Expanded inconsistency**:
-   - Collapsed shows `d.title` only
-   - Expanded shows full timeline
-   - No preview of first/last segment in collapsed state
-
-2. **No session persistence**:
-   - `expandedDays` Set is in-memory only
-   - Reloading page resets expansion state
-   - (Though TripBook data is saved via sessionStorage)
-
----
-
-## 12. SUMMARY: WHAT DETERMINES RENDERING
-
-| Factor | Code Location | Effect |
-|--------|---------------|--------|
-| `hasRightCol` check | itinerary.js:121 | Toggles two-column vs single-column |
-| `daysPlan.length` | itinerary.js:206 | If > 0, renders "每日行程" section |
-| `d.segments && d.segments.length > 0` | itinerary.js:387 | Determines timeline vs summary |
-| `expandedDays.has(d.day)` | itinerary.js:382 | Adds `.expanded` class → CSS toggles visibility |
-| `seg.type` | itinerary.js:427-429 | Colors dot: meal/transport/hotel/default |
-| `!isLast && seg.transport` | itinerary.js:453 | Shows connector between activities |
-| `.itin-two-col` CSS grid | style.css:403-408 | 2fr:3fr left-right split |
-| `.timeline-item` grid | style.css:334-339 | 3-col time-dot-content layout |
-
----
-
-## RECOMMENDATIONS FOR REDESIGN
-
-1. **Schema Validation**: Define JSON Schema for daysPlan/segments
-2. **Incremental Updates**: Support adding/updating single segments without full re-render
-3. **Progressive Rendering**: Show skeleton while segments load
-4. **Segment IDs**: Add unique `segmentId` field for targeted updates
-5. **Persistence**: Save expansion state to localStorage
-6. **Better Connectors**: Explicit `transportTo` field instead of positional logic
-7. **Timeline Accessibility**: Add scroll position tracking for expanded days
-8. **Error Boundaries**: Handle malformed segment data gracefully
+**Files Analyzed:**
+- public/js/itinerary.js (660 lines)
+- models/trip-book.js (525 lines)
+- public/css/style.css (~500 lines for itinerary sections)
+- public/index.html (10 lines panel section)
+- server.js (20 lines SSE integration)
 

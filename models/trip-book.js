@@ -11,12 +11,10 @@
 const PHASE_LABELS = [
   '',            // 0 — 未开始
   '锁定约束',    // 1
-  '机票查询',    // 2
-  '构建框架',    // 3
-  '关键预订',    // 4
-  '每日详情',    // 5
-  '预算汇总',    // 6
-  '导出总结',    // 7
+  '大交通确认',  // 2
+  '行程规划',    // 3（含住宿确认子流程）
+  '每日详情',    // 4
+  '行程总结',    // 5（含预算汇总）
 ];
 
 // ── 计数器，用于生成报价 ID ──
@@ -210,11 +208,17 @@ class TripBook {
     }
 
     if (Array.isArray(delta.days)) {
-      // 合并策略：按 day 编号覆盖
+      // 合并策略：按 day 编号覆盖，但保留已有 segments（除非新数据明确提供了非空 segments）
       for (const newDay of delta.days) {
         const idx = this.itinerary.days.findIndex(d => d.day === newDay.day);
         if (idx >= 0) {
-          this.itinerary.days[idx] = { ...this.itinerary.days[idx], ...newDay };
+          const existing = this.itinerary.days[idx];
+          // 如果新数据的 segments 为空数组或未提供，保留已有 segments
+          const merged = { ...existing, ...newDay };
+          if (existing.segments?.length > 0 && (!newDay.segments || newDay.segments.length === 0)) {
+            merged.segments = existing.segments;
+          }
+          this.itinerary.days[idx] = merged;
         } else {
           this.itinerary.days.push(newDay);
         }
@@ -428,21 +432,24 @@ class TripBook {
     const it = this.itinerary;
 
     const dest = c.destination;
-    const destStr = dest
-      ? (dest.cities?.length ? `${dest.value} ${dest.cities.join('·')}` : dest.value || '')
-      : '';
-
-    // 找一个天气（优先目的地城市）
-    let weather = null;
-    const weatherEntries = Object.values(this.dynamic.weather);
-    if (weatherEntries.length > 0) {
-      const w = weatherEntries[0];
-      weather = {
-        city: w.city,
-        temp_c: w.current?.temp_c,
-        description: w.current?.description,
-      };
+    // 目的地字符串：如果 value 已包含城市信息（有括号），不再重复拼接 cities
+    let destStr = '';
+    if (dest) {
+      const base = dest.value || '';
+      if (dest.cities?.length && !/[（(]/.test(base)) {
+        destStr = `${base}（${dest.cities.join('·')}）`;
+      } else {
+        destStr = base;
+      }
     }
+
+    // 所有目的地天气
+    const weatherEntries = Object.values(this.dynamic.weather);
+    const weatherList = weatherEntries.map(w => ({
+      city: w.city,
+      temp_c: w.current?.temp_c,
+      description: w.current?.description,
+    }));
 
     return {
       destination: destStr,
@@ -467,7 +474,8 @@ class TripBook {
           price: h.price_total_cny ? `¥${h.price_total_cny}` : `$${h.price_per_night_usd}/晚`,
           nights: h.nights, status: h.status,
         })),
-      weather,
+      weather: weatherList.length === 1 ? weatherList[0] : null,  // 单城市保持向后兼容
+      weatherList: weatherList.length > 0 ? weatherList : null,   // 多城市天气列表
       budgetSummary: it.budgetSummary,
       daysPlan: it.days.map(d => ({
         day: d.day, date: d.date, city: d.city, title: d.title,

@@ -129,7 +129,7 @@ function parseBingResults(html) {
   if (DEBUG) console.log(`[web-search] Found ${blocks.length - 1} potential result blocks`);
   
   // 跳过第一段（b_algo 之前的 HTML）
-  for (let i = 1; i < blocks.length && results.length < 8; i++) {
+  for (let i = 1; i < blocks.length && results.length < 15; i++) {
     const block = blocks[i];
 
     // 提取标题和 URL: <h2...><a ... href="URL">Title</a></h2>

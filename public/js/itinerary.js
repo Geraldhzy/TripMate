@@ -16,6 +16,7 @@ let itineraryState = {
   flights: [],
   hotels: [],
   weather: null,
+  weatherList: null,  // [{ city, temp_c, description }] — 多城市天气
   // TripBook 扩展字段
   route: [],
   daysPlan: [],       // [{ day, date, city, title, segments[] }]
@@ -28,9 +29,9 @@ const expandedDays = new Set();
 const PHASE_LABELS = [
   '', // 0 = 未开始
   '需求确认',
+  '大交通确认',
   '规划行程',
-  '完善细节',
-  '预算总结'
+  '行程总结'
 ];
 
 // 天气英文→中文兜底翻译
@@ -51,13 +52,40 @@ function translateWeather(desc) {
   return WEATHER_ZH[desc] || WEATHER_ZH[desc.trim()] || desc;
 }
 
+// 城市英文名→中文名映射（天气 API 返回英文城市名，前端翻译显示）
+const CITY_ZH = {
+  'semporna': '仙本那', 'kota kinabalu': '亚庇', 'kuala lumpur': '吉隆坡',
+  'penang': '槟城', 'langkawi': '兰卡威', 'malacca': '马六甲', 'melaka': '马六甲',
+  'johor bahru': '新山', 'sandakan': '山打根', 'kuching': '古晋',
+  'bangkok': '曼谷', 'chiang mai': '清迈', 'phuket': '普吉岛', 'pattaya': '芭提雅',
+  'tokyo': '东京', 'osaka': '大阪', 'kyoto': '京都', 'nara': '奈良', 'fukuoka': '福冈',
+  'sapporo': '札幌', 'okinawa': '冲绳', 'nagoya': '名古屋', 'kobe': '神户',
+  'seoul': '首尔', 'busan': '釜山', 'jeju': '济州',
+  'singapore': '新加坡', 'bali': '巴厘岛', 'jakarta': '雅加达',
+  'hanoi': '河内', 'ho chi minh city': '胡志明市', 'da nang': '岘港',
+  'manila': '马尼拉', 'cebu': '宿务', 'boracay': '长滩岛',
+  'hong kong': '香港', 'macau': '澳门', 'taipei': '台北',
+  'paris': '巴黎', 'london': '伦敦', 'rome': '罗马', 'barcelona': '巴塞罗那',
+  'new york': '纽约', 'los angeles': '洛杉矶', 'sydney': '悉尼', 'melbourne': '墨尔本',
+  'dubai': '迪拜', 'istanbul': '伊斯坦布尔', 'cairo': '开罗',
+  'maldives': '马尔代夫', 'male': '马累',
+  'beijing': '北京', 'shanghai': '上海', 'guangzhou': '广州', 'shenzhen': '深圳',
+  'chengdu': '成都', 'hangzhou': '杭州', 'xian': '西安', "xi'an": '西安',
+  'sanya': '三亚', 'lijiang': '丽江', 'kunming': '昆明', 'guilin': '桂林',
+  'lhasa': '拉萨', 'chongqing': '重庆', 'nanjing': '南京', 'suzhou': '苏州',
+};
+function translateCity(name) {
+  if (!name) return '';
+  return CITY_ZH[name.toLowerCase().trim()] || name;
+}
+
 // 将内部7阶段映射到面板展示的4阶段
 function mapPhase(raw) {
   if (raw <= 0) return 0;
-  if (raw <= 1) return 1;
-  if (raw <= 3) return 2;
-  if (raw <= 5) return 3;
-  return 4;
+  if (raw <= 1) return 1;     // 内部1 → 显示1 需求确认
+  if (raw <= 2) return 2;     // 内部2 → 显示2 大交通确认
+  if (raw <= 4) return 3;     // 内部3-4 → 显示3 规划行程（含行程框架+住宿+每日详情）
+  return 4;                   // 内部5 → 显示4 行程总结
 }
 
 // ============================================================
@@ -75,7 +103,7 @@ function updateItinerary(data) {
   if (data.phase) {
     const mapped = mapPhase(data.phase);
     itineraryState.phase = mapped;
-    itineraryState.phaseLabel = data.phaseLabel || PHASE_LABELS[mapped] || '';
+    itineraryState.phaseLabel = PHASE_LABELS[mapped] || '';
   }
 
   if (data.preferences && data.preferences.length > 0) {
@@ -106,7 +134,7 @@ function clearItinerary() {
     destination: '', departCity: '', dates: '', days: 0,
     people: 0, budget: '', preferences: [],
     phase: 0, phaseLabel: '',
-    flights: [], hotels: [], weather: null,
+    flights: [], hotels: [], weather: null, weatherList: null,
     route: [], daysPlan: [], budgetSummary: null
   };
   expandedDays.clear();
@@ -137,7 +165,7 @@ function renderItinerary() {
 
   let html = '';
 
-  // ── 1. 目的地大标题 ──
+  // ── 1. 行程标题（目的地主题） ──
   if (s.destination) {
     html += `<div class="itin-dest-title">${escItinHtml(s.destination)}</div>`;
   }
@@ -186,12 +214,16 @@ function renderItinerary() {
     html += `<div class="itin-tags-bar">🏷️ ${tagsHtml}</div>`;
   }
 
-  // ── 5. 天气（中文翻译） ──
-  if (s.weather) {
-    const w = s.weather;
-    const desc = w.description ? translateWeather(w.description) : '';
-    const descHtml = desc ? `，${escItinHtml(desc)}` : '';
-    html += `<div class="itin-weather-bar">🌤️ ${escItinHtml(w.city)} ${w.temp_c}°C${descHtml}</div>`;
+  // ── 5. 天气（支持多城市，中文翻译） ──
+  const weatherItems = s.weatherList || (s.weather ? [s.weather] : []);
+  if (weatherItems.length > 0) {
+    const weatherHtmlParts = weatherItems.map(w => {
+      const desc = w.description ? translateWeather(w.description) : '';
+      const descHtml = desc ? `，${escItinHtml(desc)}` : '';
+      const cityName = translateCity(w.city);
+      return `<span class="itin-weather-item">📍 ${escItinHtml(cityName)} ${w.temp_c}°C${descHtml}</span>`;
+    }).join('');
+    html += `<div class="itin-weather-bar">🌤️ ${weatherHtmlParts}</div>`;
   }
 
   // ── 6. 阶段进度 ──
@@ -306,10 +338,76 @@ function startInlineEdit(btn) {
 }
 
 // ============================================================
+// 完整快照 → 面板数据转换（复刻服务端 toPanelData 逻辑）
+// ============================================================
+function convertSnapshotToPanelData(snap) {
+  const c = snap.constraints || {};
+  const it = snap.itinerary || {};
+  const dyn = snap.dynamic || {};
+
+  const dest = c.destination;
+  let destStr = '';
+  if (dest) {
+    const base = dest.value || '';
+    if (dest.cities?.length && !/[（(]/.test(base)) {
+      destStr = `${base}（${dest.cities.join('·')}）`;
+    } else {
+      destStr = base;
+    }
+  }
+
+  const weatherEntries = Object.values(dyn.weather || {});
+  const weatherList = weatherEntries.map(w => ({
+    city: w.city, temp_c: w.current?.temp_c, description: w.current?.description
+  }));
+  const weather = weatherList.length === 1 ? weatherList[0] : null;
+
+  return {
+    destination: destStr,
+    departCity: c.departCity?.value || '',
+    dates: c.dates ? (c.dates.start ? `${c.dates.start} ~ ${c.dates.end}` : '') : '',
+    days: c.dates?.days || 0,
+    people: c.people?.count || 0,
+    budget: c.budget?.value || '',
+    preferences: c.preferences?.tags || [],
+    phase: it.phase || 0,
+    phaseLabel: it.phaseLabel || '',
+    route: it.route || [],
+    weather,
+    weatherList: weatherList.length > 0 ? weatherList : null,
+    budgetSummary: it.budgetSummary || null,
+    daysPlan: (it.days || []).map(d => ({
+      day: d.day, date: d.date, city: d.city, title: d.title,
+      segments: (d.segments || []).map(seg => ({
+        time: seg.time || '', title: seg.title || seg.activity || '',
+        location: seg.location || '', duration: seg.duration || '',
+        transport: seg.transport || '', transportTime: seg.transportTime || '',
+        notes: seg.notes || '', type: seg.type || 'activity',
+      })),
+    })),
+    flights: (dyn.flightQuotes || []).map(f => ({
+      route: f.route, airline: f.airline,
+      price: f.price_cny ? `¥${f.price_cny}` : `$${f.price_usd}`,
+      time: f.duration, status: f.status,
+    })),
+    hotels: (dyn.hotelQuotes || []).map(h => ({
+      name: h.name, city: h.city,
+      price: h.price_total_cny ? `¥${h.price_total_cny}` : `$${h.price_per_night_usd}/晚`,
+      nights: h.nights, status: h.status,
+    })),
+  };
+}
+
+// ============================================================
 // TripBook 数据更新（从 tripbook_update SSE 事件）
 // ============================================================
 function updateFromTripBook(data) {
   if (!data) return;
+
+  // 兼容完整 TripBook 快照格式（从历史对话恢复时可能是这种格式）
+  if (data.constraints && !data.destination) {
+    data = convertSnapshotToPanelData(data);
+  }
 
   if (data.destination) itineraryState.destination = data.destination;
   if (data.departCity) itineraryState.departCity = data.departCity;
@@ -320,13 +418,16 @@ function updateFromTripBook(data) {
   if (data.phase) {
     const mapped = mapPhase(data.phase);
     itineraryState.phase = mapped;
-    itineraryState.phaseLabel = data.phaseLabel || PHASE_LABELS[mapped] || '';
+    itineraryState.phaseLabel = PHASE_LABELS[mapped] || '';
   }
   if (data.preferences && data.preferences.length > 0) {
     itineraryState.preferences = data.preferences;
   }
   if (data.weather) {
     itineraryState.weather = data.weather;
+  }
+  if (Array.isArray(data.weatherList) && data.weatherList.length > 0) {
+    itineraryState.weatherList = data.weatherList;
   }
 
   // TripBook 扩展字段
@@ -405,6 +506,7 @@ function renderDaysPlan(daysPlan) {
 
   let html = '<div class="itin-section-header">';
   html += '<span class="itin-section-title" style="margin:0">📋 每日行程</span>';
+  // 只有存在可展开的 segments 时才显示全部展开/收起按钮
   if (anySegments) {
     html += `<button class="itin-toggle-all" id="toggle-all-btn" onclick="toggleAllDays()">${toggleText}</button>`;
   }
@@ -502,15 +604,28 @@ function renderBudgetSummary(summary) {
   let html = '<div class="itin-section-title">💰 预算摘要</div>';
   html += '<div class="itin-budget">';
 
-  const items = ['flights', 'hotels', 'attractions', 'meals', 'transport', 'misc'];
-  for (const key of items) {
+  // 优先按已知顺序展示，再展示其余项目（防止 AI 用不同 key 名导致漏项）
+  const META_KEYS = ['total_cny', 'budget_cny', 'remaining_cny'];
+  const knownOrder = ['flights', 'hotels', 'accommodation', 'attractions', 'activities', 'meals', 'food', 'transport', 'transportation', 'misc', 'other', 'shopping', 'insurance', 'visa', 'communication'];
+  const rendered = new Set();
+
+  function renderItem(key) {
+    if (rendered.has(key)) return;
     const item = summary[key];
-    if (item && item.amount_cny) {
+    if (item && typeof item === 'object' && item.amount_cny) {
+      rendered.add(key);
       html += `<div class="budget-item">
         <span class="budget-label">${escItinHtml(item.label || key)}</span>
         <span class="budget-amount">¥${item.amount_cny.toLocaleString()}</span>
       </div>`;
     }
+  }
+
+  // 先渲染已知顺序的项目
+  for (const key of knownOrder) renderItem(key);
+  // 再渲染其余未知项目（AI 可能新增的类别）
+  for (const key of Object.keys(summary)) {
+    if (!META_KEYS.includes(key)) renderItem(key);
   }
 
   html += `<div class="budget-item budget-total">

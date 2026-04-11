@@ -1,0 +1,295 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║     AI TRAVEL PLANNER — BACKEND DATA ARCHITECTURE QUICK REFERENCE          ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ TRIPBOOK CLASS: 4-LAYER ARCHITECTURE (models/trip-book.js)                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+
+  LAYER 1: STATIC KNOWLEDGE (cross-session reuse)
+  ├─ knowledgeRefs[]        ["Japan", "Thailand"]
+  └─ activityRefs[]         ["Scuba Diving", "Hiking"]
+
+  LAYER 2: DYNAMIC DATA (TTL-based cache)
+  ├─ weather{}              { "tokyo": { current, forecast, _meta } }
+  ├─ exchangeRates{}        { "USD_CNY": { rate: 7.25, _meta } }
+  ├─ flightQuotes[]         [{ id: "f1", airline, price_usd, status }]
+  ├─ hotelQuotes[]          [{ id: "h1", name, price_per_night, status }]
+  └─ webSearches[]          [{ query, summary, fetched_at }]
+
+  LAYER 3: USER CONSTRAINTS (confirmed by AI)
+  ├─ destination            { value, cities[], confirmed, confirmed_at }
+  ├─ departCity             { value, airports[], confirmed, confirmed_at }
+  ├─ dates                  { start, end, days, flexible, confirmed }
+  ├─ people                 { count, details, confirmed }
+  ├─ budget                 { value, per_person, currency, scope, confirmed }
+  ├─ preferences            { tags[], notes, confirmed }
+  ├─ specialRequests[]      [{ type, value, confirmed }]
+  └─ _history[]             [{ field, from, to, changed_at, reason }]
+
+  LAYER 4: ITINERARY (AI-built plan)
+  ├─ phase                  0-7 (0=not started, 1=constraints, 3=itinerary, 5=summary)
+  ├─ route[]                ["Tokyo", "Kyoto", "Osaka"]
+  ├─ days[]                 [{ day, date, city, title, segments[] }]
+  ├─ budgetSummary         { flights, hotels, activities, total_cny, remaining }
+  └─ reminders[]            ["Complete Visit Japan Web 3 days before..."]
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ TRIPBOOK EXPORT METHODS                                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+
+  toPanelData()              ✓ Frontend itinerary panel rendering
+  ├─ Returns: Flattened, UI-friendly structure
+  ├─ Used by: React component for display
+  └─ Includes: destination, phase, flights, hotels, weather, daysPlan
+
+  toJSON()                   ✓ Persistence & session recovery
+  ├─ Returns: Complete internal state
+  ├─ Used by: Client-side localStorage
+  └─ Includes: Full constraints history, all quotes, search logs
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ TOOL ECOSYSTEM (8 Tools in /tools/)                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+
+  1. search_flights         → TripBook.addFlightQuote()
+     Input:  { origin: "MFM", destination: "NRT", date: "2026-05-01" }
+     Output: { flights: [{airline, price_usd, duration, stops}] }
+     Cache: Per-route, no TTL (live prices)
+
+  2. search_hotels          → TripBook.addHotelQuote()
+     Input:  { city: "Tokyo", checkin, checkout }
+     Output: { hotels: [{name, price_per_night, rating}] }
+     Cache: Per-city/date, no TTL (live prices)
+
+  3. get_weather            → TripBook.setWeather()
+     Input:  { city: "Tokyo", date?: "2026-05-02" }
+     Output: { current: {temp_c, humidity, description}, forecast: [] }
+     Cache: 3 hours per city
+
+  4. get_exchange_rate      → TripBook.setExchangeRate()
+     Input:  { from: "USD", to: "CNY", amount?: 450 }
+     Output: { rate: 7.25, converted, display }
+     Cache: 4 hours per pair
+
+  5. web_search             → TripBook.addWebSearch()
+     Input:  { query: "日本签证", language: "zh-CN" }
+     Output: { results: [{title, url, snippet}] }
+     Cache: Per-query deduplication (prevent re-search)
+
+  6. search_poi             → Not synced to TripBook (results-only)
+     Input:  { query, location, category }
+     Output: { results: [{name, lat, lon, address, phone}] }
+
+  7. cache_destination_knowledge  → TripBook.addKnowledgeRef()
+     Input:  { destination: "Japan", content: "Markdown..." }
+     Output: { success, message }
+     Cache: 30 days per destination
+
+  8. update_trip_info (Core Writer) → TripBook.updateConstraints/Phase/Itinerary()
+     Input:  { constraints: {...}, phase: 3, itinerary: {...} }
+     Output: { success, updates, message }
+     Cache: Immediate TripBook update + SSE broadcast
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ DATA FLOW: USER MESSAGE → AI → TOOL CALLS → TRIPBOOK → FRONTEND            │
+├─────────────────────────────────────────────────────────────────────────────┤
+
+  POST /api/chat
+    ├─ Request: { messages, provider, model, tripBookSnapshot?, knownRates?, ... }
+    │
+    ├─ TripBook restored from snapshot (if provided)
+    │  └─ updateConstraints() + updateItinerary() called
+    │
+    ├─ System prompt injected with:
+    │  ├─ Confirmed constraints (don't re-ask)
+    │  ├─ Cached weather/rates (prevent duplicate API calls)
+    │  ├─ Current itinerary progress
+    │  └─ Search history (avoid re-searching same topic)
+    │
+    ├─ AI agent processes (max 10 tool rounds)
+    │  │
+    │  ├─ Tool Call 1: search_flights
+    │  │  ├─ runTool() executes
+    │  │  ├─ Result parsed JSON
+    │  │  ├─ forEach flight: tripBook.addFlightQuote()
+    │  │  └─ SSE: tool_result
+    │  │
+    │  ├─ Tool Call 2: get_exchange_rate
+    │  │  ├─ runTool() executes
+    │  │  ├─ tripBook.setExchangeRate()
+    │  │  ├─ SSE: rate_cached { from, to, rate }
+    │  │  └─ SSE: tool_result
+    │  │
+    │  ├─ Tool Call 3: update_trip_info (Core update!)
+    │  │  ├─ runTool() executes
+    │  │  ├─ tripBook.updateConstraints(constraints)
+    │  │  ├─ tripBook.updatePhase(phase)
+    │  │  ├─ tripBook.updateItinerary(itinerary)
+    │  │  ├─ SSE: tripbook_update {
+    │  │  │     ...toPanelData()    ← Frontend render
+    │  │  │     _snapshot: toJSON() ← Client persist
+    │  │  │  }
+    │  │  └─ SSE: tool_result
+    │  │
+    │  └─ No more tool calls → Return AI response
+    │
+    ├─ Extract Quick Replies from response (pattern matching)
+    │  └─ SSE: quick_replies [{ text, options, allowInput?, multiSelect? }]
+    │
+    └─ SSE: done
+
+  Response: Server-Sent Events (streaming)
+    ├─ token              Real-time text streaming
+    ├─ tool_start         Tool execution begins
+    ├─ tool_result        Tool completed
+    ├─ rate_cached        Exchange rate cached
+    ├─ weather_cached     Weather cached
+    ├─ tripbook_update    ✓ MAIN UI UPDATE (contains toPanelData + snapshot)
+    ├─ quick_replies      Suggested follow-up questions
+    └─ done               Conversation round complete
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ FRONTEND RECEIVES (FROM TRIPBOOK)                                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+
+  toPanelData() Structure:
+  ├─ destination          "Japan (Tokyo·Kyoto·Osaka)"
+  ├─ departCity           "Beijing"
+  ├─ dates                "2026-05-01 ~ 2026-05-07"
+  ├─ days                 7
+  ├─ people               3
+  ├─ budget               "¥20,000"
+  ├─ preferences          ["美食", "文化", "休闲"]
+  ├─ phase                3
+  ├─ phaseLabel           "行程规划"
+  ├─ route                ["Tokyo", "Kyoto", "Osaka"]
+  ├─ flights              [{ route, airline, price, time, status }]
+  ├─ hotels               [{ name, city, price, nights, status }]
+  ├─ weather              { city, temp_c, description }  ← single city
+  ├─ weatherList          [{ city, temp_c, description }]  ← multiple cities
+  ├─ budgetSummary        { flights, hotels, activities, total_cny, remaining_cny }
+  └─ daysPlan             [{ day, date, city, title, segments[] }]
+       └─ segments:       [{ time, title, location, duration, transport, notes, type }]
+
+  _snapshot (Complete state for persistence):
+    ├─ constraints + _history
+    ├─ dynamic + flightQuotes/hotelQuotes (unfiltered)
+    ├─ itinerary + reminders
+    └─ knowledgeRefs
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ QUOTE STATUS LIFECYCLE                                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+
+  "quoted"   ← Initial state when added by tool
+  "selected" ← AI or user picks this option
+  "booked"   ← Confirmed/reserved
+
+  In toPanelData(): Shows all non-"quoted" (unless ≤5 total)
+  In system prompt: Shows only "selected" options to avoid confusion
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ KEY FILES & LINE NUMBERS                                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+
+  server.js
+    Line 22-131       POST /api/chat route
+    Line 51           new TripBook()
+    Line 179-284      runTool() — Tool execution & TripBook sync
+    Line 195-212      Weather/Exchange rate sync to TripBook
+    Line 215-239      Flight/Hotel/Web search sync
+    Line 257-274      update_trip_info → TripBook updates
+    Line 416-489      extractQuickReplies()
+
+  models/trip-book.js
+    Line 23-62        Constructor (4 layers)
+    Line 84-130       Layer 2 methods (weather, rates, quotes)
+    Line 140-179      Layer 3: updateConstraints()
+    Line 199-239      Layer 4: updateItinerary()
+    Line 248-306      buildConstraintsPromptSection()
+    Line 430-494      toPanelData() ✓ Export for frontend
+    Line 500-510      toJSON() ✓ Export for persistence
+
+  tools/
+    flight-search.js   (Calls search_flights.py)
+    hotel-search.js    (Calls search_hotels.py)
+    weather.js         (3-hour cache)
+    exchange-rate.js   (4-hour cache)
+    web-search.js      (Bing HTML parsing)
+    poi-search.js      (OpenStreetMap)
+    dest-knowledge.js  (30-day file cache)
+    update-trip-info.js (Core data writer)
+
+  tools/scripts/
+    search_flights.py  (Google Flights via fast-flights)
+    search_hotels.py   (Google Hotels via Playwright)
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ CACHING STRATEGY                                                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+
+  Server-side in-memory:
+  ├─ Weather        3 hours per city
+  ├─ Exchange rates 4 hours per pair
+  └─ Destination knowledge 30 days per destination
+
+  Client-side localStorage:
+  ├─ knownRates     4-hour TTL (refreshed from server)
+  ├─ knownWeather   3-hour TTL (refreshed from server)
+  └─ tripBookSnapshot (full state for session recovery)
+
+  TripBook internal:
+  ├─ Flight quotes    No TTL (always shown if status != "quoted")
+  ├─ Hotel quotes     No TTL (always shown if status != "quoted")
+  └─ Web searches     Deduplication by query string
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ CONSTRAINTS FLOW: AI INPUT → TRIPBOOK STORAGE → SYSTEM PROMPT              │
+├─────────────────────────────────────────────────────────────────────────────┤
+
+  AI Detects User Constraint
+    ↓
+  AI calls: update_trip_info tool
+    { constraints: { destination: { value: "Japan", confirmed: true } } }
+    ↓
+  server.js runTool() processes result
+    ↓
+  tripBook.updateConstraints() merges delta
+    ├─ Sets confirmed_at timestamp
+    ├─ Records change in _history[]
+    └─ Stores with confirmed flag
+    ↓
+  buildConstraintsPromptSection() generates text
+    "## 用户已确认信息（勿重复询问）
+     - 目的地：Japan（Tokyo·Kyoto）✅
+     - 人数：3人 ❓  (pending)"
+    ↓
+  Injected into next system prompt
+    ↓
+  AI sees "already confirmed" → stops re-asking
+     or sees "pending" → knows what to ask next
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ ITINERARY PHASES (Phase Transitions)                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+
+  Phase 0 (default)      Not started
+  Phase 1                锁定约束 (Confirm constraints)
+  Phase 2                大交通确认 (Confirm major transport)
+  Phase 3                行程规划 (Build itinerary route)
+  Phase 4                每日详情 (Daily details & segments)
+  Phase 5                行程总结 (Summary & reminders)
+  Phase 6-7              Reserved
+
+  Frontend maps to 4-stage display:
+    Phases 0-1  → Stage 1: "确认需求" (Confirm Requirements)
+    Phases 2-3  → Stage 2: "规划行程" (Plan Itinerary)
+    Phases 4-5  → Stage 3: "完善细节" (Perfect Details)
+    Phase 6+    → Stage 4: "预算总结" (Budget Summary)
+
+════════════════════════════════════════════════════════════════════════════════
+
+Generated: 2026-04-12
+Document: Complete backend data structure & tool flow reference
+Usage: Frontend integration, understanding data flow, debugging

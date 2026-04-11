@@ -266,8 +266,11 @@ async function runTool(funcName, funcArgs, toolId, sendSSE, tripBook) {
           if (updates.itinerary) {
             tripBook.updateItinerary(updates.itinerary);
           }
-          // 推送 TripBook 面板数据到前端
-          sendSSE('tripbook_update', tripBook.toPanelData());
+          // 推送 TripBook 面板数据到前端（附加完整快照供持久化）
+          sendSSE('tripbook_update', {
+            ...tripBook.toPanelData(),
+            _snapshot: tripBook.toJSON()   // 完整结构化数据，含 constraints/itinerary/dynamic
+          });
         }
       } catch {}
     }
@@ -467,7 +470,8 @@ function extractQuickReplies(text, tripBook) {
   while ((match = listPattern.exec(searchArea)) !== null) {
     const itemText = match[2].replace(/\*\*/g, '').trim();
     // 过滤：每项不超过 40 字，排除太长的段落描述
-    if (itemText.length > 0 && itemText.length <= 40) {
+    // 过滤：包含问号的是子问题，不是可选选项
+    if (itemText.length > 0 && itemText.length <= 40 && !/[？?]/.test(itemText)) {
       items.push(itemText);
     }
   }
