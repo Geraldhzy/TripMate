@@ -13,6 +13,7 @@ const { getCachedRates } = require('./tools/exchange-rate');
 const { getCachedWeather } = require('./tools/weather');
 const { TripBook } = require('./models/trip-book');
 const { initCache: initDestCache } = require('./tools/dest-knowledge');
+const { executeDelegation } = require('./agents/delegate');
 
 const app = express();
 
@@ -52,7 +53,18 @@ app.use(additionalSecurityHeaders());
 // Request Parsing & Sanitization
 // ============================================================
 app.use(express.json({ limit: '1mb' }));
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'), {
+  etag: false,
+  lastModified: false,
+  setHeaders: (res, filePath) => {
+    // 开发阶段禁用缓存，确保浏览器始终获取最新文件
+    if (filePath.endsWith('.js') || filePath.endsWith('.css') || filePath.endsWith('.html')) {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    }
+  }
+}));
 
 // Input sanitization middleware
 app.use(sanitizeBody());
@@ -80,19 +92,16 @@ const chatLimiter = rateLimit({
   message: { error: '您的对话请求过于频繁，请稍后再试' },
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => req.ip, // Use IP address as key
   skip: (req) => req.headers['x-skip-rate-limit'] === process.env.RATE_LIMIT_BYPASS_KEY,
 });
 
 // Tool execution rate limiter: 50 per hour per IP
-// (Applied globally to catch tool-heavy interactions)
 const toolLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
   max: 50,
   message: { error: '工具调用请求过于频繁，请稍后再试' },
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => req.ip,
   skip: (req) => req.headers['x-skip-rate-limit'] === process.env.RATE_LIMIT_BYPASS_KEY,
 });
 
@@ -176,19 +185,26 @@ app.post('/api/chat', validateHeaders(), validate(chatRequestSchema), chatLimite
           for (const ref of tripBookSnapshot.knowledgeRefs) tripBook.addKnowledgeRef(ref);
         }
       }
-    } catch {}
+    } catch (err) {
+      console.error('[TripBook] Snapshot restoration failed:', err.message);
+      console.error('[TripBook] Stack:', err.stack);
+      if (tripBookSnapshot) {
+        const snapStr = JSON.stringify(tripBookSnapshot).slice(0, 300);
+        console.error('[TripBook] Snapshot (truncated):', snapStr);
+      }
+    }
 
     const conversationText = messages.map(m => m.content || '').join(' ');
     const systemPrompt = buildSystemPrompt(conversationText, knownRates, knownWeather, tripBook);
 
     let fullText = '';
     if (provider === 'anthropic') {
-      fullText = await handleAnthropicChat(apiKey, model, systemPrompt, messages, sendSSE, baseUrl, tripBook) || '';
+      fullText = await handleAnthropicChat(apiKey, model, systemPrompt, messages, sendSSE, baseUrl, tripBook, 'anthropic') || '';
     } else if (provider === 'deepseek') {
       const dsBaseUrl = baseUrl || 'https://api.deepseek.com/v1';
-      fullText = await handleOpenAIChat(apiKey, model, systemPrompt, messages, sendSSE, dsBaseUrl, tripBook) || '';
+      fullText = await handleOpenAIChat(apiKey, model, systemPrompt, messages, sendSSE, dsBaseUrl, tripBook, 'deepseek') || '';
     } else {
-      fullText = await handleOpenAIChat(apiKey, model, systemPrompt, messages, sendSSE, baseUrl, tripBook) || '';
+      fullText = await handleOpenAIChat(apiKey, model, systemPrompt, messages, sendSSE, baseUrl, tripBook, 'openai') || '';
     }
 
     // Quick Replies 检测：从 AI 回复中提取可点击选项
@@ -228,9 +244,12 @@ function getToolResultLabel(funcName, funcArgs, resultStr) {
         return `找到 ${count} 条结果：「${q}${funcArgs.query?.length > 20 ? '…' : ''}」`;
       }
       case 'get_weather': {
-        if (data.current) {
-          const desc = data.current.description ? `，${data.current.description}` : '';
-          return `${data.city} 当前 ${data.current.temp_c}°C${desc}`;
+        if (data.forecast && data.forecast.length > 0) {
+          const range = data.query_range ? `${data.query_range.start} ~ ${data.query_range.end}` : '';
+          const temps = data.forecast.map(d => d.max_temp_c).filter(Boolean);
+          const avgHigh = temps.length ? Math.round(temps.reduce((a, b) => a + b, 0) / temps.length) : '?';
+          const typeLabel = data.data_type === 'climate_reference' ? '（历史参考）' : '';
+          return `${data.city} ${range} 平均高温 ${avgHigh}°C${typeLabel}`;
         }
         return `${data.city || ''} 天气已获取`;
       }
@@ -258,7 +277,25 @@ function getToolResultLabel(funcName, funcArgs, resultStr) {
   }
 }
 
-async function runTool(funcName, funcArgs, toolId, sendSSE, tripBook) {
+async function runTool(funcName, funcArgs, toolId, sendSSE, tripBook, delegateCtx) {
+  // ── delegate_to_agents 特殊处理 ──
+  if (funcName === 'delegate_to_agents') {
+    sendSSE('tool_start', { id: toolId, name: funcName, arguments: funcArgs });
+    try {
+      const { provider, apiKey, model, baseUrl } = delegateCtx || {};
+      const resultStr = await executeDelegation(
+        funcArgs.tasks, provider, apiKey, model, sendSSE, baseUrl
+      );
+      console.log(`[delegate] 结果长度: ${resultStr.length} 字符`);
+      sendSSE('tool_result', { id: toolId, name: funcName, resultLabel: '子Agent调研完成' });
+      return resultStr;
+    } catch (err) {
+      const errMsg = `delegate_to_agents 执行失败: ${err.message}`;
+      sendSSE('tool_result', { id: toolId, name: funcName, resultLabel: '委派执行失败' });
+      return errMsg;
+    }
+  }
+
   sendSSE('tool_start', { id: toolId, name: funcName, arguments: funcArgs });
   try {
     const result = await executeToolCall(funcName, funcArgs);
@@ -354,7 +391,14 @@ async function runTool(funcName, funcArgs, toolId, sendSSE, tripBook) {
             _snapshot: tripBook.toJSON()   // 完整结构化数据，含 constraints/itinerary/dynamic
           });
         }
-      } catch {}
+      } catch (err) {
+      console.error('[TripBook] Snapshot restoration failed:', err.message);
+      console.error('[TripBook] Stack:', err.stack);
+      if (tripBookSnapshot) {
+        const snapStr = JSON.stringify(tripBookSnapshot).slice(0, 300);
+        console.error('[TripBook] Snapshot (truncated):', snapStr);
+      }
+    }
     }
 
     return resultStr;
@@ -573,7 +617,7 @@ function extractQuickReplies(text, tripBook) {
 // ============================================================
 // OpenAI Agent 循环
 // ============================================================
-async function handleOpenAIChat(apiKey, model, systemPrompt, userMessages, sendSSE, baseUrl, tripBook) {
+async function handleOpenAIChat(apiKey, model, systemPrompt, userMessages, sendSSE, baseUrl, tripBook, provider) {
   const clientOpts = { apiKey };
   if (baseUrl) clientOpts.baseURL = baseUrl;
   const client = new OpenAI(clientOpts);
@@ -586,8 +630,10 @@ async function handleOpenAIChat(apiKey, model, systemPrompt, userMessages, sendS
   ];
 
   const MAX_TOOL_ROUNDS = 10;
+  let delegationCount = 0; // 防止主 Agent 反复委派
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    console.log(`[OpenAI] round ${round + 1}/${MAX_TOOL_ROUNDS}, messages: ${messages.length}`);
     // 真流式调用
     const stream = await client.chat.completions.create({
       model: selectedModel,
@@ -650,7 +696,18 @@ async function handleOpenAIChat(apiKey, model, systemPrompt, userMessages, sendS
           funcArgs = {};
         }
 
-        const resultStr = await runTool(funcName, funcArgs, toolId, sendSSE, tripBook);
+        // 防止主 Agent 反复委派（每次请求最多委派 2 次）
+        if (funcName === 'delegate_to_agents') {
+          delegationCount++;
+          if (delegationCount > 2) {
+            console.warn(`[OpenAI] 检测到重复委派 (${delegationCount}次)，跳过`);
+            messages.push({ role: 'tool', tool_call_id: toolCall.id, content: '已达到本轮委派上限，请直接基于已有信息回复用户。' });
+            continue;
+          }
+        }
+
+        const delegateCtx = { provider: provider || 'openai', apiKey, model: selectedModel, baseUrl };
+        const resultStr = await runTool(funcName, funcArgs, toolId, sendSSE, tripBook, delegateCtx);
         messages.push({ role: 'tool', tool_call_id: toolCall.id, content: resultStr });
       }
 
@@ -659,12 +716,15 @@ async function handleOpenAIChat(apiKey, model, systemPrompt, userMessages, sendS
 
     return fullText; // 返回完整回复文本供 quick_replies 检测
   }
+
+  // 达到最大工具轮次仍在循环 → 返回空字符串，避免 undefined
+  return '';
 }
 
 // ============================================================
 // Anthropic Agent 循环
 // ============================================================
-async function handleAnthropicChat(apiKey, model, systemPrompt, userMessages, sendSSE, baseUrl, tripBook) {
+async function handleAnthropicChat(apiKey, model, systemPrompt, userMessages, sendSSE, baseUrl, tripBook, provider) {
   const clientOpts = { apiKey };
   if (baseUrl) clientOpts.baseURL = baseUrl;
   const client = new Anthropic(clientOpts);
@@ -674,8 +734,10 @@ async function handleAnthropicChat(apiKey, model, systemPrompt, userMessages, se
   const messages = [...userMessages];
 
   const MAX_TOOL_ROUNDS = 10;
+  let delegationCount = 0; // 防止主 Agent 反复委派
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    console.log(`[Anthropic] round ${round + 1}/${MAX_TOOL_ROUNDS}, messages: ${messages.length}`);
     // 真流式调用
     const stream = client.messages.stream({
       model: selectedModel,
@@ -701,7 +763,18 @@ async function handleAnthropicChat(apiKey, model, systemPrompt, userMessages, se
 
       const toolResults = [];
       for (const toolUse of toolUseBlocks) {
-        const resultStr = await runTool(toolUse.name, toolUse.input, toolUse.id, sendSSE, tripBook);
+        // 防止主 Agent 反复委派（每次请求最多委派 2 次）
+        if (toolUse.name === 'delegate_to_agents') {
+          delegationCount++;
+          if (delegationCount > 2) {
+            console.warn(`[Anthropic] 检测到重复委派 (${delegationCount}次)，跳过`);
+            toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: '已达到本轮委派上限，请直接基于已有信息回复用户。' });
+            continue;
+          }
+        }
+
+        const delegateCtx = { provider: provider || 'anthropic', apiKey, model: selectedModel, baseUrl };
+        const resultStr = await runTool(toolUse.name, toolUse.input, toolUse.id, sendSSE, tripBook, delegateCtx);
         toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: resultStr });
       }
 
@@ -745,4 +818,20 @@ app.listen(PORT, () => {
   if (process.env.SENTRY_DSN) {
     console.log(`   Sentry monitoring enabled\n`);
   }
+
+  // 每 30 秒检查内存使用情况，超过阈值时发出警告
+  const MEM_WARN_MB = 512;
+  setInterval(() => {
+    const mem = process.memoryUsage();
+    const rssMB = Math.round(mem.rss / 1024 / 1024);
+    const heapMB = Math.round(mem.heapUsed / 1024 / 1024);
+    if (rssMB > MEM_WARN_MB) {
+      console.warn(`⚠️ 内存警告: RSS=${rssMB}MB, Heap=${heapMB}MB (阈值 ${MEM_WARN_MB}MB)`);
+      // 触发 GC（如果暴露了 --expose-gc）
+      if (global.gc) {
+        console.log('  → 触发手动 GC');
+        global.gc();
+      }
+    }
+  }, 30000).unref(); // unref() 确保不阻止进程退出
 });
