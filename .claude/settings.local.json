@@ -53,7 +53,21 @@
       "Bash(chmod +x /tmp/analyze_changes.sh)",
       "Bash(/tmp/analyze_changes.sh)",
       "Bash(chmod +x /tmp/verify_implementation.sh)",
-      "Bash(/tmp/verify_implementation.sh)"
+      "Bash(/tmp/verify_implementation.sh)",
+      "Bash(grep -o '\"content\":\\\\[{\"type\":\"text\",\"text\":\"[^\"]*' /Users/geraldhuang/.claude-internal/projects/-Users-geraldhuang-DEV-ai-travel-planner/14fc227c-7ec5-4c19-ab08-5ccac78f0670/subagents/agent-a7f1c794d9485da2a.jsonl)",
+      "Bash(git:*)",
+      "Bash(npm install:*)",
+      "Bash(npm test:*)",
+      "Bash(grep -h \"name:\" tools/*.js)",
+      "Bash(npm run:*)",
+      "Bash(curl -s http://localhost:3000)",
+      "Bash(pkill -f \"node server.js\")",
+      "Bash(pkill -9 node)",
+      "Bash(ulimit -m)",
+      "Bash(ulimit -v)",
+      "Bash(sysctl -n hw.memsize)",
+      "Bash(log show:*)",
+      "Bash(grep -E \"\\\\.js$|trip-book\")"
     ]
   }
 }

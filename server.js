@@ -176,6 +176,41 @@ app.post('/api/chat', validateHeaders(), validate(chatRequestSchema), chatLimite
     // 污染新行程面板。天气仍通过 knownWeather 注入系统提示防止重复查询，
     // TripBook 天气仅在 AI 本次调用 get_weather 时通过 setWeather 写入。
 
+    /**
+     * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+     * TripBook 生命周期管理
+     * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+     * 
+     * TripBook 是 single source of truth，跨越请求周期的持久化依赖：
+     * 
+     * REQUEST 1（初始请求）:
+     *   1. 新建 TripBook 实例（server.js line 136）
+     *   2. AI 调用 update_trip_info 工具 → constraints 写入 TripBook
+     *   3. server.js line 389-392: 发送 SSE tripbook_update 事件，附带 _snapshot
+     *   4. chat.js line 383: 客户端存储 snapshot 到 sessionStorage
+     * 
+     * REQUEST 2（后续请求）:
+     *   1. 新建 TripBook 实例（server.js line 136）
+     *   2. chat.js line 149-150: 从 sessionStorage 读取 snapshot，随请求发送
+     *   3. server.js line 180-195: 尝试恢复 snapshot (THIS SECTION)
+     *   4. 如果恢复成功 → TripBook 有数据 → 系统提示包含"用户已确认信息"
+     *   5. 如果恢复失败 → TripBook 空白 → 系统提示缺少"用户已确认信息"
+     *      → AI 重新询问用户的已确认信息（BUG）
+     *   6. server.js line 198: buildSystemPrompt(tripBook) 取决于 TripBook 状态
+     * 
+     * CRITICAL ROOT CAUSE:
+     *   - 如果 JSON.parse 失败或 updateConstraints 异常，错误被捕获但不重新抛出
+     *   - TripBook 保持空白状态，系统提示无"已确认信息"部分
+     *   - "严禁重复询问"规则在系统提示中，但没有已确认信息可参考
+     *   - 结果：AI 看不到用户的确认信息，重新开始提问
+     * 
+     * DEBUGGING:
+     *   - 服务器日志: 查找 "[TripBook] Snapshot restoration failed" 错误
+     *   - 客户端日志: 查找 "[Chat] Failed to parse TripBook snapshot" 警告
+     *   - SSE 流量: 检查 tripbook_update 事件是否包含完整 _snapshot
+     *   - 系统提示: 新请求中是否包含"用户已确认信息"部分
+     * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+     */
     // 尝试从客户端传来的 TripBook 快照恢复约束和行程状态
     try {
       if (tripBookSnapshot) {

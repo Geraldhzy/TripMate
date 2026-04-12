@@ -47,9 +47,10 @@ const TOOL_DEF = {
         description: [
           '行程数据增量更新。可包含：',
           'route: ["东京","京都","大阪"]，',
-          'days: [{ day: 1, date: "2026-05-01", city: "东京", title: "抵达东京", segments: [...] }]，',
+          'days: [{ day: 1, date: "2026-05-01", city: "东京", title: "抵达东京", segments: [{ time: "14:00", title: "抵达机场", type: "flight", location: "成田机场", duration: "", notes: "" }, { time: "19:00", title: "晚餐：浅草天妇罗", type: "meal", location: "大黒家", notes: "人均¥2000日元" }] }]，',
+          'segment.type 必须是以下之一：transport（交通）、attraction（景点）、activity（体验活动）、meal（餐饮）、hotel（住宿）、flight（航班），用于前端分类展示。',
           'budgetSummary: { flights: { amount_cny: 6480, label: "机票" }, ..., total_cny: 17964 }，',
-          'reminders: ["出发前完成Visit Japan Web注册"]'
+          'reminders: ["出发前完成Visit Japan Web注册", "兑换3万日元现金", "购买旅行保险"] — 行前准备清单，在最终阶段必须写入'
         ].join('')
       }
     }
@@ -88,7 +89,28 @@ async function execute(args) {
   }
 
   if (constraints) {
+    // ⚠️ CRITICAL: Ensure all constraint fields have confirmed: true for system prompt injection
+    // Without confirmed flag, buildConstraintsPromptSection() will mark as "待确认" (pending)
+    // and AI will re-ask the question due to missing "严禁重复询问" rule
     updates.constraints = constraints;
+    
+    // Set confirmed: true on all constraint fields if not explicitly set
+    const constraintFields = ['destination', 'departCity', 'dates', 'people', 'budget', 'preferences', 'specialRequests'];
+    for (const field of constraintFields) {
+      if (constraints[field] !== undefined) {
+        if (Array.isArray(constraints[field])) {
+          // specialRequests is array
+          constraints[field] = constraints[field].map(item => ({
+            ...item,
+            confirmed: item.confirmed !== false ? true : false
+          }));
+        } else if (typeof constraints[field] === 'object') {
+          // Other fields are objects
+          constraints[field].confirmed = constraints[field].confirmed !== false ? true : false;
+        }
+      }
+    }
+    
     const fields = Object.keys(constraints).filter(k => k !== '_reason');
     const fieldLabels = fields.map(f => FIELD_LABELS[f] || f);
     messages.push(`已记录${fieldLabels.join('、')}`);

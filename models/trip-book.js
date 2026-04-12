@@ -146,7 +146,14 @@ class TripBook {
       if (delta[field] !== undefined) {
         const oldVal = this.constraints[field];
         const newVal = { ...delta[field] };
-        // 自动设置 confirmed_at
+        
+        // ⚠️  CRITICAL: Ensure confirmed flag is set when LLM provides constraint data
+        // When AI calls update_trip_info with confirmed: true, set confirmed_at timestamp
+        // If confirmed flag is missing/undefined, default to true (assuming AI confirmation means commitment)
+        // If explicitly false, preserve it (for pending/tentative constraints)
+        if (newVal.confirmed === undefined) {
+          newVal.confirmed = true; // Default: treat new constraints as confirmed
+        }
         if (newVal.confirmed && !newVal.confirmed_at) {
           newVal.confirmed_at = now;
         }
@@ -244,6 +251,48 @@ class TripBook {
 
   /**
    * 生成"已确认用户约束"文本，注入系统提示告知 AI 不要重复询问
+   */
+  /**
+   * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   * buildConstraintsPromptSection() - 系统提示约束注入
+   * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   * 
+   * 这个方法是 TripBook → 系统提示注入的关键链接。
+   * 
+   * SPLIT LOGIC (第 257/263/272/277/285/291 行):
+   *   const confirmed = [];  // 已确认信息（constraint.confirmed === true）
+   *   const pending = [];    // 待确认信息（constraint.confirmed !== true）
+   * 
+   *   if (constraint.confirmed) {
+   *     confirmed.push(`${label} ✅`);
+   *   } else {
+   *     pending.push(`${label} ❓`);
+   *   }
+   * 
+   * OUTPUT FORMAT (第 300-305 行):
+   *   ## 用户已确认信息（勿重复询问）
+   *   - 目的地：日本 ✅
+   *   - 出发城市：北京 ✅
+   *   - 日期：2026-05-01 ~ 2026-05-07（7天）✅
+   *   
+   *   ## 待确认信息
+   *   - 预算：❓
+   * 
+   * CRITICAL DEPENDENCY:
+   *   如果 constraint.confirmed === undefined，会进入 pending 列表
+   *   system-prompt.js line 66: "严禁重复询问" 规则对应已确认信息
+   *   如果已确认列表为空 → 规则无法生效 → AI 重新提问
+   * 
+   * FIX (models/trip-book.js line 154-156):
+   *   if (newVal.confirmed === undefined) {
+   *     newVal.confirmed = true;  // 默认设为已确认
+   *   }
+   * 
+   * DEBUGGING:
+   *   1. 检查约束对象的 confirmed 字段值：true/false/undefined
+   *   2. 查看系统提示是否包含"用户已确认信息"部分
+   *   3. 如果信息在 confirmed 但系统提示中仍然缺失，说明恢复失败
+   * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
    */
   buildConstraintsPromptSection() {
     const c = this.constraints;
@@ -489,6 +538,18 @@ class TripBook {
           notes: seg.notes || '',
           type: seg.type || 'activity',
         })),
+      })),
+
+      // 行前准备 & 重要信息 Tab
+      reminders: it.reminders || [],
+      exchangeRates: Object.values(this.dynamic.exchangeRates).map(r => ({
+        from: r.from, to: r.to, rate: r.rate, last_updated: r.last_updated,
+      })),
+      webSearchSummaries: this.dynamic.webSearches.map(s => ({
+        query: s.query, summary: s.summary || '', fetched_at: s.fetched_at,
+      })),
+      specialRequests: (c.specialRequests || []).map(r => ({
+        type: r.type, value: r.value, confirmed: r.confirmed,
       })),
     };
   }

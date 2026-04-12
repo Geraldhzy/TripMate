@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AI Travel Planner - 旅行规划助手</title>
-  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/style.css?v=3">
 
 </head>
 <body>
@@ -118,22 +118,47 @@
       </footer>
     </div>
 
-    <!-- 右侧：行程信息面板 -->
+    <!-- 右侧：行程详情面板 -->
     <div class="itinerary-panel" id="itinerary-panel">
-      <div class="itinerary-header">
-        <span class="itinerary-title">行程概览</span>
-      </div>
-      <div class="itinerary-body" id="itinerary-body">
-        <div class="itinerary-empty">
-          <div class="itinerary-empty-icon">✈️</div>
-          <p>开始对话后，行程信息将在这里汇总</p>
+      <!-- 侧边书签 Tab -->
+      <nav class="tab-sidebar" id="tab-nav">
+        <button class="tab-btn active" data-tab="overview" title="总览"><span class="tab-icon">📋</span><span class="tab-label">总览</span></button>
+        <button class="tab-btn" data-tab="prep" title="行前准备"><span class="tab-icon">✈️</span><span class="tab-label">行前</span></button>
+        <button class="tab-btn" data-tab="transport" title="交通安排"><span class="tab-icon">🚄</span><span class="tab-label">交通</span></button>
+        <button class="tab-btn" data-tab="hotel" title="住宿"><span class="tab-icon">🏨</span><span class="tab-label">住宿</span></button>
+        <button class="tab-btn" data-tab="food" title="餐饮"><span class="tab-icon">🍜</span><span class="tab-label">餐饮</span></button>
+        <button class="tab-btn" data-tab="attraction" title="景点活动"><span class="tab-icon">📍</span><span class="tab-label">景点</span></button>
+        <button class="tab-btn" data-tab="budget" title="预算"><span class="tab-icon">💰</span><span class="tab-label">预算</span></button>
+        <button class="tab-btn" data-tab="itinerary" title="完整行程"><span class="tab-icon">📅</span><span class="tab-label">行程</span></button>
+        <button class="tab-btn" data-tab="info" title="重要信息"><span class="tab-icon">ℹ️</span><span class="tab-label">信息</span></button>
+      </nav>
+      <!-- 内容区 -->
+      <div class="itinerary-main">
+        <div class="itinerary-header">
+          <span class="itinerary-title">行程详情</span>
+        </div>
+        <div class="itinerary-body" id="itinerary-body">
+          <div class="itinerary-empty">
+            <div class="itinerary-empty-icon">✈️</div>
+            <p>开始对话后，行程信息将在这里汇总</p>
+          </div>
         </div>
       </div>
     </div>
 
   </div>
 
-  <script src="js/itinerary.js"></script>
-  <script src="js/chat.js"></script>
+  <script>
+    // 全局错误捕获（调试用，帮助定位按钮不可点击问题）
+    window.onerror = function(msg, url, line, col, err) {
+      console.error('[Global Error]', msg, url, line, col, err);
+      var d = document.createElement('div');
+      d.style.cssText = 'position:fixed;bottom:0;left:0;right:0;background:red;color:white;padding:8px 12px;font-size:12px;z-index:9999;';
+      d.textContent = 'JS Error: ' + msg + ' (' + (url||'').split('/').pop() + ':' + line + ')';
+      document.body.appendChild(d);
+    };
+  </script>
+  <script src="js/itinerary.js?v=3"></script>
+  <script src="js/chat.js?v=3"></script>
 </body>
 </html>

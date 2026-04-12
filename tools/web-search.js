@@ -64,10 +64,19 @@ function fetch(url, opts = {}) {
         return;
       }
       
+      const MAX_HTML_SIZE = 512 * 1024; // 512KB 上限，避免内存爆炸
       let data = '';
-      res.on('data', c => data += c);
+      let truncated = false;
+      res.on('data', c => {
+        if (truncated) return;
+        data += c;
+        if (data.length > MAX_HTML_SIZE) {
+          truncated = true;
+          if (DEBUG) console.warn(`[web-search] Response truncated at ${MAX_HTML_SIZE} bytes`);
+        }
+      });
       res.on('end', () => {
-        if (DEBUG) console.log(`[web-search] Response received: ${data.length} bytes`);
+        if (DEBUG) console.log(`[web-search] Response received: ${data.length} bytes${truncated ? ' (truncated)' : ''}`);
         resolve(data);
       });
     });

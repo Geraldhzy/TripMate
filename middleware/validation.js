@@ -13,7 +13,7 @@ const chatRequestSchema = Joi.object({
           .valid('user', 'assistant')
           .required(),
         content: Joi.string()
-          .max(5000)
+          .max(50000)
           .required()
       })
     )
@@ -34,24 +34,29 @@ const chatRequestSchema = Joi.object({
         from: Joi.string().length(3).required(),
         to: Joi.string().length(3).required(),
         rate: Joi.number().positive().required(),
-        fetched_at: Joi.number().optional(),
-        last_updated: Joi.number().optional()
-      })
+        fetched_at: Joi.alternatives().try(Joi.number(), Joi.string()).optional(),
+        last_updated: Joi.alternatives().try(Joi.number(), Joi.string()).optional()
+      }).unknown(true)
     )
     .optional(),
-  
+
   knownWeather: Joi.array()
     .items(
       Joi.object({
         city: Joi.string().max(100).required(),
-        current: Joi.object().optional(),
+        current: Joi.object().unknown(true).optional(),
         forecast: Joi.array().optional(),
-        fetched_at: Joi.number().optional()
-      })
+        query_range: Joi.object().unknown(true).optional(),
+        data_type: Joi.string().optional(),
+        notice: Joi.string().optional(),
+        city_local: Joi.string().optional(),
+        fetched_at: Joi.alternatives().try(Joi.number(), Joi.string()).optional()
+      }).unknown(true)
     )
     .optional(),
   
   tripBookSnapshot: Joi.object()
+    .unknown(true)
     .optional()
 });
 
@@ -125,6 +130,8 @@ function validate(schema, source = 'body') {
         message: d.message,
         type: d.type
       }));
+
+      console.error('[Validation Error]', JSON.stringify(errors, null, 2));
 
       return res.status(400).json({
         error: '请求参数验证失败',

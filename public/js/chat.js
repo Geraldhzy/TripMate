@@ -144,11 +144,19 @@ async function streamChat(settings) {
     if (freshRates.length > 0) bodyPayload.knownRates = freshRates;
     const freshWeather = getFreshWeather();
     if (freshWeather.length > 0) bodyPayload.knownWeather = freshWeather;
+    // Restore TripBook snapshot from client-side sessionStorage for cross-request context
     try {
       const tripBookSnapshot = sessionStorage.getItem('tp_tripbook_snapshot')
                              || sessionStorage.getItem('tp_tripbook');
       if (tripBookSnapshot) bodyPayload.tripBookSnapshot = JSON.parse(tripBookSnapshot);
-    } catch {}
+    } catch (err) {
+      // Log snapshot retrieval errors to aid debugging of AI re-asking questions
+      console.warn('[Chat] Failed to parse TripBook snapshot from sessionStorage', {
+        error: err.message,
+        stack: err.stack,
+        storageKeys: Object.keys(sessionStorage).filter(k => k.startsWith('tp_'))
+      });
+    }
 
     const resp = await fetch('/api/chat', {
       method: 'POST',
@@ -315,7 +323,14 @@ function handleSSEEvent(type, data, bubble, toolContainer, getFullText) {
       // 提取并存储完整快照（供服务端恢复 TripBook）
       const snapshot = data._snapshot;
       if (snapshot) {
-        try { sessionStorage.setItem('tp_tripbook_snapshot', JSON.stringify(snapshot)); } catch {}
+        try {
+          sessionStorage.setItem('tp_tripbook_snapshot', JSON.stringify(snapshot));
+        } catch (err) {
+          console.error('[Chat] Failed to store TripBook snapshot in sessionStorage', {
+            error: err.message,
+            snapshotSize: JSON.stringify(snapshot).length
+          });
+        }
       }
       // 面板渲染用去掉 _snapshot 的数据（避免 itinerary.js 处理多余字段）
       const panelData = { ...data };

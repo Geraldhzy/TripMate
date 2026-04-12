@@ -10,11 +10,13 @@ const flightSearch = require('./flight-search');
 const hotelSearch = require('./hotel-search');
 const destKnowledge = require('./dest-knowledge');
 const updateTripInfo = require('./update-trip-info');
+const delegate = require('../agents/delegate');
+
 const ALL_TOOLS = [webSearch, weather, exchangeRate, poiSearch, flightSearch, hotelSearch, destKnowledge, updateTripInfo];
 
-// OpenAI function calling 格式
+// OpenAI function calling 格式（含 delegate_to_agents）
 function getToolDefinitions() {
-  return ALL_TOOLS.map(t => ({
+  const tools = ALL_TOOLS.map(t => ({
     type: 'function',
     function: {
       name: t.TOOL_DEF.name,
@@ -22,18 +24,35 @@ function getToolDefinitions() {
       parameters: t.TOOL_DEF.parameters
     }
   }));
+  // 添加 delegate_to_agents
+  tools.push({
+    type: 'function',
+    function: {
+      name: delegate.TOOL_DEF.name,
+      description: delegate.TOOL_DEF.description,
+      parameters: delegate.TOOL_DEF.parameters
+    }
+  });
+  return tools;
 }
 
-// Anthropic tool use 格式
+// Anthropic tool use 格式（含 delegate_to_agents）
 function getToolDefinitionsForAnthropic() {
-  return ALL_TOOLS.map(t => ({
+  const tools = ALL_TOOLS.map(t => ({
     name: t.TOOL_DEF.name,
     description: t.TOOL_DEF.description,
     input_schema: t.TOOL_DEF.parameters
   }));
+  // 添加 delegate_to_agents
+  tools.push({
+    name: delegate.TOOL_DEF.name,
+    description: delegate.TOOL_DEF.description,
+    input_schema: delegate.TOOL_DEF.parameters
+  });
+  return tools;
 }
 
-// 统一工具执行器
+// 统一工具执行器（不含 delegate_to_agents，该工具由 server.js 特殊处理）
 const toolMap = {};
 ALL_TOOLS.forEach(t => { toolMap[t.TOOL_DEF.name] = t.execute; });
 

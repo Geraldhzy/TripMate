@@ -56,9 +56,9 @@ echo ""
   fi
 ) &
 
-# 启动服务
+# 启动服务（限制堆内存避免被系统 OOM Kill）
 if [ -f ".env" ]; then
-  node --env-file=.env server.js
+  node --max-old-space-size=1024 --env-file=.env server.js
 else
-  node server.js
+  node --max-old-space-size=1024 server.js
 fi
