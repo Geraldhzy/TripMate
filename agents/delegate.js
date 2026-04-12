@@ -4,6 +4,7 @@
  */
 const { runSubAgent } = require('./sub-agent-runner');
 const { AGENT_CONFIGS } = require('./config');
+const log = require('../utils/logger');
 
 const TOOL_DEF = {
   name: 'delegate_to_agents',
@@ -45,16 +46,27 @@ const TOOL_DEF = {
  * @param {string} baseUrl
  * @param {number} timeoutMs - 单个子 Agent 超时时间（默认 60 秒）
  */
-async function executeDelegation(tasks, provider, apiKey, model, sendSSE, baseUrl, timeoutMs = 60000) {
+async function executeDelegation(tasks, provider, apiKey, model, sendSSE, baseUrl, timeoutMs = 60000, reqLog) {
+  const delLog = (reqLog || log).child({ tool: 'delegate' });
+
   if (!Array.isArray(tasks) || tasks.length === 0) {
+    delLog.warn('空任务列表');
     return JSON.stringify({ results: [], error: '没有指定任务' });
   }
 
   // 验证 agent 类型
   const validTasks = tasks.filter(t => AGENT_CONFIGS[t.agent]);
   if (validTasks.length === 0) {
+    delLog.warn('所有Agent类型无效', { agents: tasks.map(t => t.agent) });
     return JSON.stringify({ results: [], error: '所有指定的 Agent 类型无效' });
   }
+
+  const batchTimer = delLog.startTimer('delegation_batch');
+  delLog.info('开始并行委派', {
+    taskCount: validTasks.length,
+    agents: validTasks.map(t => t.agent),
+    timeoutMs
+  });
 
   sendSSE('agents_batch_start', {
     count: validTasks.length,
@@ -67,12 +79,13 @@ async function executeDelegation(tasks, provider, apiKey, model, sendSSE, baseUr
 
   // 并行执行所有子 Agent，带超时保护
   const promises = validTasks.map(({ agent, task }) => {
-    const agentPromise = runSubAgent(agent, task, provider, apiKey, model, sendSSE, baseUrl);
+    const agentPromise = runSubAgent(agent, task, provider, apiKey, model, sendSSE, baseUrl, reqLog);
 
     // 超时保护（agent 完成后清除 timer，避免 phantom error 事件）
     let timeoutId;
     const timeoutPromise = new Promise((resolve) => {
       timeoutId = setTimeout(() => {
+        delLog.warn('子Agent执行超时', { agent, timeoutMs });
         sendSSE('agent_error', {
           agent,
           label: AGENT_CONFIGS[agent]?.label || agent,
@@ -106,10 +119,15 @@ async function executeDelegation(tasks, provider, apiKey, model, sendSSE, baseUr
     failed: formattedResults.filter(r => r.status !== 'success').length
   });
 
+  const successCount = formattedResults.filter(r => r.status === 'success').length;
+  const failedCount = formattedResults.filter(r => r.status !== 'success').length;
+  batchTimer.done({ total: formattedResults.length, success: successCount, failed: failedCount });
+
   // 截断过长的子 Agent 结果，避免撑爆主 Agent 上下文
   const MAX_RESULT_CHARS = 4000;
   for (const r of formattedResults) {
     if (r.data && r.data.length > MAX_RESULT_CHARS) {
+      delLog.debug('子Agent结果截断', { agent: r.agent, originalLen: r.data.length, maxLen: MAX_RESULT_CHARS });
       r.data = r.data.slice(0, MAX_RESULT_CHARS) + '\n\n…（结果过长，已截断。关键信息已包含在上方内容中）';
     }
   }

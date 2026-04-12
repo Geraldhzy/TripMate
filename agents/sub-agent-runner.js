@@ -9,6 +9,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 // tools/index.js → agents/delegate.js → sub-agent-runner.js → tools/index.js
 // 改为在函数内部延迟加载
 const { AGENT_CONFIGS } = require('./config');
+const log = require('../utils/logger');
 
 // 单个工具结果的最大字符数（避免子 Agent 消息数组内存爆炸）
 const MAX_TOOL_RESULT_CHARS = 8000;
@@ -115,8 +116,9 @@ function getToolLabel(funcName, resultStr) {
 /**
  * 运行子 Agent (OpenAI 格式)
  */
-async function runSubAgentOpenAI(agentType, task, apiKey, model, sendSSE, baseUrl) {
+async function runSubAgentOpenAI(agentType, task, apiKey, model, sendSSE, baseUrl, agentLog) {
   const config = AGENT_CONFIGS[agentType];
+  const aLog = agentLog || log.child({ agent: agentType });
   const systemPrompt = config.buildPrompt();
   const tools = getToolsForAgent(agentType, 'openai');
 
@@ -133,6 +135,8 @@ async function runSubAgentOpenAI(agentType, task, apiKey, model, sendSSE, baseUr
   const selectedModel = model || 'gpt-4o';
 
   for (let round = 0; round < config.maxRounds; round++) {
+    aLog.debug(`子Agent轮次 ${round + 1}/${config.maxRounds}`);
+    const llmTimer = aLog.startTimer('sub_llm_call');
     const response = await client.chat.completions.create({
       model: selectedModel,
       messages,
@@ -144,6 +148,7 @@ async function runSubAgentOpenAI(agentType, task, apiKey, model, sendSSE, baseUr
 
     const choice = response.choices[0];
     const toolCalls = choice.message.tool_calls || [];
+    llmTimer.done({ toolCallCount: toolCalls.length });
 
     if (toolCalls.length > 0) {
       // 追加 assistant 消息
@@ -157,17 +162,21 @@ async function runSubAgentOpenAI(agentType, task, apiKey, model, sendSSE, baseUr
         sendSSE('agent_tool', { agent: agentType, tool: funcName, status: 'running' });
 
         try {
+          const toolTimer = aLog.startTimer(`sub_tool:${funcName}`);
           const result = await getTools().executeToolCall(funcName, funcArgs);
           let resultStr = typeof result === 'string' ? result : JSON.stringify(result);
           // 截断过长的工具结果，避免子 Agent 消息数组内存爆炸
           if (resultStr.length > MAX_TOOL_RESULT_CHARS) {
+            aLog.debug('工具结果截断', { tool: funcName, originalLen: resultStr.length, maxLen: MAX_TOOL_RESULT_CHARS });
             resultStr = resultStr.slice(0, MAX_TOOL_RESULT_CHARS) + '\n…(结果已截断)';
           }
           const label = getToolLabel(funcName, resultStr);
+          toolTimer.done({ resultLen: resultStr.length, label });
 
           sendSSE('agent_tool_done', { agent: agentType, tool: funcName, label });
           messages.push({ role: 'tool', tool_call_id: tc.id, content: resultStr });
         } catch (err) {
+          aLog.error('子Agent工具执行失败', { tool: funcName, error: err.message });
           const errStr = `工具执行失败: ${err.message}`;
           sendSSE('agent_tool_done', { agent: agentType, tool: funcName, label: '执行失败' });
           messages.push({ role: 'tool', tool_call_id: tc.id, content: errStr });
@@ -187,8 +196,9 @@ async function runSubAgentOpenAI(agentType, task, apiKey, model, sendSSE, baseUr
 /**
  * 运行子 Agent (Anthropic 格式)
  */
-async function runSubAgentAnthropic(agentType, task, apiKey, model, sendSSE, baseUrl) {
+async function runSubAgentAnthropic(agentType, task, apiKey, model, sendSSE, baseUrl, agentLog) {
   const config = AGENT_CONFIGS[agentType];
+  const aLog = agentLog || log.child({ agent: agentType });
   const systemPrompt = config.buildPrompt();
   const tools = getToolsForAgent(agentType, 'anthropic');
 
@@ -200,6 +210,8 @@ async function runSubAgentAnthropic(agentType, task, apiKey, model, sendSSE, bas
   const selectedModel = model || 'claude-sonnet-4-20250514';
 
   for (let round = 0; round < config.maxRounds; round++) {
+    aLog.debug(`子Agent轮次 ${round + 1}/${config.maxRounds}`);
+    const llmTimer = aLog.startTimer('sub_llm_call');
     const response = await client.messages.create({
       model: selectedModel,
       system: systemPrompt,
@@ -210,6 +222,7 @@ async function runSubAgentAnthropic(agentType, task, apiKey, model, sendSSE, bas
     });
 
     const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
+    llmTimer.done({ toolCallCount: toolUseBlocks.length });
 
     if (toolUseBlocks.length > 0) {
       messages.push({ role: 'assistant', content: response.content });
@@ -219,17 +232,21 @@ async function runSubAgentAnthropic(agentType, task, apiKey, model, sendSSE, bas
         sendSSE('agent_tool', { agent: agentType, tool: toolUse.name, status: 'running' });
 
         try {
+          const toolTimer = aLog.startTimer(`sub_tool:${toolUse.name}`);
           const result = await getTools().executeToolCall(toolUse.name, toolUse.input);
           let resultStr = typeof result === 'string' ? result : JSON.stringify(result);
           // 截断过长的工具结果
           if (resultStr.length > MAX_TOOL_RESULT_CHARS) {
+            aLog.debug('工具结果截断', { tool: toolUse.name, originalLen: resultStr.length, maxLen: MAX_TOOL_RESULT_CHARS });
             resultStr = resultStr.slice(0, MAX_TOOL_RESULT_CHARS) + '\n…(结果已截断)';
           }
           const label = getToolLabel(toolUse.name, resultStr);
+          toolTimer.done({ resultLen: resultStr.length, label });
 
           sendSSE('agent_tool_done', { agent: agentType, tool: toolUse.name, label });
           toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: resultStr });
         } catch (err) {
+          aLog.error('子Agent工具执行失败', { tool: funcName, error: err.message });
           const errStr = `工具执行失败: ${err.message}`;
           sendSSE('agent_tool_done', { agent: agentType, tool: toolUse.name, label: '执行失败' });
           toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: errStr });
@@ -259,9 +276,16 @@ async function runSubAgentAnthropic(agentType, task, apiKey, model, sendSSE, bas
  * @param {string} baseUrl - 可选的 API baseURL
  * @returns {Promise<{agent: string, status: string, data: string}>}
  */
-async function runSubAgent(agentType, task, provider, apiKey, model, sendSSE, baseUrl) {
+async function runSubAgent(agentType, task, provider, apiKey, model, sendSSE, baseUrl, reqLog) {
+  const agentLog = (reqLog || log).child({ agent: agentType });
+  const agentTimer = agentLog.startTimer(`sub_agent:${agentType}`);
   const memBefore = process.memoryUsage();
-  console.log(`[sub-agent:${agentType}] 启动, RSS: ${Math.round(memBefore.rss / 1024 / 1024)}MB, Heap: ${Math.round(memBefore.heapUsed / 1024 / 1024)}MB`);
+  agentLog.info('子Agent启动', {
+    task: task.slice(0, 100),
+    provider,
+    rssMB: Math.round(memBefore.rss / 1024 / 1024),
+    heapMB: Math.round(memBefore.heapUsed / 1024 / 1024)
+  });
 
   sendSSE('agent_start', {
     agent: agentType,
@@ -273,14 +297,18 @@ async function runSubAgent(agentType, task, provider, apiKey, model, sendSSE, ba
   try {
     let result;
     if (provider === 'anthropic') {
-      result = await runSubAgentAnthropic(agentType, task, apiKey, model, sendSSE, baseUrl);
+      result = await runSubAgentAnthropic(agentType, task, apiKey, model, sendSSE, baseUrl, agentLog);
     } else {
       // OpenAI and DeepSeek (OpenAI-compatible) both use OpenAI format
-      result = await runSubAgentOpenAI(agentType, task, apiKey, model, sendSSE, baseUrl);
+      result = await runSubAgentOpenAI(agentType, task, apiKey, model, sendSSE, baseUrl, agentLog);
     }
 
     const memAfter = process.memoryUsage();
-    console.log(`[sub-agent:${agentType}] 完成, RSS: ${Math.round(memAfter.rss / 1024 / 1024)}MB, Heap: ${Math.round(memAfter.heapUsed / 1024 / 1024)}MB, 结果长度: ${(result || '').length}`);
+    agentTimer.done({
+      resultLen: (result || '').length,
+      rssMB: Math.round(memAfter.rss / 1024 / 1024),
+      heapMB: Math.round(memAfter.heapUsed / 1024 / 1024)
+    });
 
     sendSSE('agent_done', {
       agent: agentType,
@@ -290,6 +318,7 @@ async function runSubAgent(agentType, task, provider, apiKey, model, sendSSE, ba
 
     return { agent: agentType, status: 'success', data: result };
   } catch (err) {
+    agentLog.error('子Agent执行失败', { error: err.message, stack: err.stack });
     sendSSE('agent_error', {
       agent: agentType,
       label: AGENT_CONFIGS[agentType]?.label || agentType,

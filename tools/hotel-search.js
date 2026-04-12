@@ -23,7 +23,7 @@ function execute(params) {
     const scriptPath = path.join(__dirname, 'scripts', 'search_hotels.py');
     const child = spawn('python3', [scriptPath], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      timeout: 45000
+      timeout: 70000
     });
 
     let stdout = '';

@@ -31,8 +31,13 @@ def main():
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
             page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
-            page.goto(url, wait_until="networkidle", timeout=30000)
-            page.wait_for_timeout(3000)
+            page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            # 等待酒店卡片出现，而非等 networkidle（Google 有大量后续请求导致 idle 超时）
+            try:
+                page.wait_for_selector('[data-hveid], .Hkjgbb, .kCsInf', timeout=15000)
+            except:
+                pass  # 即使选择器超时，也尝试解析已加载的内容
+            page.wait_for_timeout(2000)
 
             hotels = []
 
