@@ -671,7 +671,7 @@ async function handleChat(apiKey, model, systemPrompt, userMessages, sendSSE, ba
 
   const messages = [{ role: 'system', content: systemPrompt }, ...userMessages];
 
-  const MAX_TOOL_ROUNDS = 30;
+  const MAX_TOOL_ROUNDS = 10;
   let delegationCount = 0;
   const delegatedAgents = new Set(); // 记录已成功委派过的 agent 类型，防止重复委派
   let pendingCoverMsg = null; // coveredTopics 消息暂存，等 tool 消息全部 push 后再注入
@@ -684,7 +684,7 @@ async function handleChat(apiKey, model, systemPrompt, userMessages, sendSSE, ba
     chatLog.info(`主Agent轮次 ${round + 1}/${MAX_TOOL_ROUNDS}`, { msgCount: messages.length });
     const llmTimer = chatLog.startTimer('llm_call');
 
-    const { fullText, toolCalls, rawAssistant } = await streamOpenAI(client, selectedModel, messages, tools, sendSSE, true);
+    const { fullText, toolCalls, rawAssistant } = await streamOpenAI(client, selectedModel, messages, tools, sendSSE, false);
 
     llmTimer.done({ textLen: fullText.length, toolCallCount: toolCalls.length });
 
@@ -730,14 +730,14 @@ async function handleChat(apiKey, model, systemPrompt, userMessages, sendSSE, ba
       break;
     }
 
-    const toolResults = [];
-    for (const tc of toolCalls) {
+    // ── 并行执行所有工具调用（包括委派检查） ──
+    const toolPromises = toolCalls.map(async (tc) => {
+      // 委派检查在执行前进行（保持顺序一致性）
       if (tc.name === 'delegate_to_agents') {
         delegationCount++;
         if (delegationCount > 2) {
           chatLog.warn('检测到重复委派，跳过', { delegationCount });
-          toolResults.push({ id: tc.id, content: '已达到本轮委派上限，请直接基于已有信息回复用户。' });
-          continue;
+          return { id: tc.id, content: '已达到本轮委派上限，请直接基于已有信息回复用户。', toolName: tc.name };
         }
 
         // 过滤掉已成功委派过的 agent 类型（防止同类型重复委派）
@@ -752,17 +752,15 @@ async function handleChat(apiKey, model, systemPrompt, userMessages, sendSSE, ba
           });
           if (tc.args.tasks.length === 0) {
             chatLog.warn('所有子Agent均已执行过，跳过委派', { filtered: originalCount });
-            toolResults.push({ id: tc.id, content: `所有指定的子Agent（${Array.from(delegatedAgents).join(', ')}）在本次对话中已执行过，结果已在上方。请直接基于已有信息回复用户，不要重复委派。` });
-            continue;
+            return { id: tc.id, content: `所有指定的子Agent（${Array.from(delegatedAgents).join(', ')}）在本次对话中已执行过，结果已在上方。请直接基于已有信息回复用户，不要重复委派。`, toolName: tc.name };
           }
         }
       }
 
       const delegateCtx = { provider: 'openai', apiKey, model: selectedModel, baseUrl };
       const resultStr = await runTool(tc.name, tc.args, tc.id, sendSSE, tripBook, delegateCtx, reqLog);
-      toolResults.push({ id: tc.id, content: resultStr });
-
-      // 对 delegate_to_agents 的结果，记录已委派 agent + 收集 coveredTopics（稍后注入）
+      
+      // 对 delegate_to_agents 的结果，记录已委派 agent + 收集 coveredTopics
       if (tc.name === 'delegate_to_agents') {
         try {
           const delegResult = JSON.parse(resultStr);
@@ -790,7 +788,20 @@ ${delegResult._instruction || ''}`.trim();
           chatLog.debug('coveredTopics 提取失败', { error: e.message });
         }
       }
-    }
+
+      return { id: tc.id, content: resultStr, toolName: tc.name };
+    });
+
+    // 并行等待所有工具执行完成
+    const toolSettled = await Promise.allSettled(toolPromises);
+    const toolResults = toolSettled.map((r, i) => {
+      if (r.status === 'fulfilled') {
+        return r.value;
+      }
+      const tc = toolCalls[i];
+      chatLog.error('工具执行失败', { tool: tc.name, error: r.reason?.message });
+      return { id: tc.id, content: `工具 ${tc.name} 执行失败: ${r.reason?.message || '未知错误'}`, toolName: tc.name };
+    });
 
     // ── 自动推进 phase ──
     try {
