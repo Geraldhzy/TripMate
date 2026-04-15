@@ -26,51 +26,33 @@ describe('Frontend Itinerary Logic', () => {
     };
   });
 
-  describe('Phase Mapping', () => {
-    // Simulating the mapPhase() function logic
-    function mapPhase(internalPhase) {
-      const mapping = {
-        0: { phase: 0, label: '未开始' },
-        1: { phase: 1, label: '需求确认' },
-        2: { phase: 1, label: '需求确认' },
-        3: { phase: 2, label: '大交通确认' },
-        4: { phase: 3, label: '规划行程' },
-        5: { phase: 3, label: '规划行程' },
-        6: { phase: 4, label: '行程总结' },
-        7: { phase: 4, label: '行程总结' }
-      };
-      return mapping[internalPhase] || mapping[0];
-    }
+  describe('Phase Labels', () => {
+    // Direct 4-phase system (no mapping needed)
+    const PHASE_LABELS = ['', '了解需求', '规划框架', '完善详情', '行程总结'];
 
-    test('should map phase 0 to 0 (未开始)', () => {
-      const result = mapPhase(0);
-      expect(result.phase).toBe(0);
-      expect(result.label).toBe('未开始');
+    test('phase 0 should be empty (未开始)', () => {
+      expect(PHASE_LABELS[0]).toBe('');
     });
 
-    test('should map phases 1-2 to 1 (需求确认)', () => {
-      expect(mapPhase(1).phase).toBe(1);
-      expect(mapPhase(2).phase).toBe(1);
+    test('phase 1 should be 了解需求', () => {
+      expect(PHASE_LABELS[1]).toBe('了解需求');
     });
 
-    test('should map phase 3 to 2 (大交通确认)', () => {
-      expect(mapPhase(3).phase).toBe(2);
+    test('phase 2 should be 规划框架', () => {
+      expect(PHASE_LABELS[2]).toBe('规划框架');
     });
 
-    test('should map phases 4-5 to 3 (规划行程)', () => {
-      expect(mapPhase(4).phase).toBe(3);
-      expect(mapPhase(5).phase).toBe(3);
+    test('phase 3 should be 完善详情', () => {
+      expect(PHASE_LABELS[3]).toBe('完善详情');
     });
 
-    test('should map phases 6-7 to 4 (行程总结)', () => {
-      expect(mapPhase(6).phase).toBe(4);
-      expect(mapPhase(7).phase).toBe(4);
+    test('phase 4 should be 行程总结', () => {
+      expect(PHASE_LABELS[4]).toBe('行程总结');
     });
 
-    test('should handle invalid phases', () => {
-      const result = mapPhase(10);
-      expect(result).toBeDefined();
-      expect(result.phase).toBe(0);
+    test('should handle out-of-range phases gracefully', () => {
+      expect(PHASE_LABELS[5]).toBeUndefined();
+      expect(PHASE_LABELS[-1]).toBeUndefined();
     });
   });
 

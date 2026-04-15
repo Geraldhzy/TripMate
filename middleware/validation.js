@@ -1,4 +1,5 @@
 const Joi = require('joi');
+const log = require('../utils/logger');
 
 /**
  * Input validation schemas for API endpoints
@@ -27,89 +28,10 @@ const chatRequestSchema = Joi.object({
   model: Joi.string()
     .max(100)
     .optional(),
-  
-  knownRates: Joi.array()
-    .items(
-      Joi.object({
-        from: Joi.string().length(3).required(),
-        to: Joi.string().length(3).required(),
-        rate: Joi.number().positive().required(),
-        fetched_at: Joi.alternatives().try(Joi.number(), Joi.string()).optional(),
-        last_updated: Joi.alternatives().try(Joi.number(), Joi.string()).optional()
-      }).unknown(true)
-    )
-    .optional(),
 
-  knownWeather: Joi.array()
-    .items(
-      Joi.object({
-        city: Joi.string().max(100).required(),
-        current: Joi.object().unknown(true).optional(),
-        forecast: Joi.array().optional(),
-        query_range: Joi.object().unknown(true).optional(),
-        data_type: Joi.string().optional(),
-        notice: Joi.string().optional(),
-        city_local: Joi.string().optional(),
-        fetched_at: Joi.alternatives().try(Joi.number(), Joi.string()).optional()
-      }).unknown(true)
-    )
-    .optional(),
-  
   tripBookSnapshot: Joi.object()
     .unknown(true)
     .optional()
-});
-
-// Weather search validation schema
-const weatherSearchSchema = Joi.object({
-  city: Joi.string()
-    .max(100)
-    .required(),
-  
-  lang: Joi.string()
-    .max(10)
-    .default('en')
-});
-
-// Exchange rate validation schema
-const exchangeRateSchema = Joi.object({
-  from: Joi.string()
-    .length(3)
-    .uppercase()
-    .required(),
-  
-  to: Joi.string()
-    .length(3)
-    .uppercase()
-    .required()
-});
-
-// POI search validation schema
-const poiSearchSchema = Joi.object({
-  destination: Joi.string()
-    .max(200)
-    .required(),
-  
-  category: Joi.string()
-    .max(100)
-    .optional(),
-  
-  limit: Joi.number()
-    .integer()
-    .min(1)
-    .max(50)
-    .default(10)
-});
-
-// Web search validation schema
-const webSearchSchema = Joi.object({
-  query: Joi.string()
-    .max(500)
-    .required(),
-  
-  language: Joi.string()
-    .max(10)
-    .default('zh-CN')
 });
 
 /**
@@ -131,7 +53,7 @@ function validate(schema, source = 'body') {
         type: d.type
       }));
 
-      console.error('[Validation Error]', JSON.stringify(errors, null, 2));
+      log.warn('请求验证失败', { errors });
 
       return res.status(400).json({
         error: '请求参数验证失败',
@@ -217,10 +139,6 @@ function sanitizeBody() {
 
 module.exports = {
   chatRequestSchema,
-  weatherSearchSchema,
-  exchangeRateSchema,
-  poiSearchSchema,
-  webSearchSchema,
   validate,
   validateHeaders,
   sanitizeInput,

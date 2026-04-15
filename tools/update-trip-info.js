@@ -2,7 +2,6 @@
  * update_trip_info 工具
  *
  * 让 AI 主动推送结构化的用户约束和行程数据到 TripBook，
- * 替代之前不可靠的正则提取（extractItineraryInfo）。
  *
  * AI 在以下时机调用：
  *   1. 确认用户需求后（目的地、日期、人数、预算、偏好）
@@ -50,7 +49,8 @@ const TOOL_DEF = {
           'days: [{ day: 1, date: "2026-05-01", city: "东京", title: "抵达东京", segments: [{ time: "14:00", title: "抵达机场", type: "flight", location: "成田机场", duration: "", notes: "" }, { time: "19:00", title: "晚餐：浅草天妇罗", type: "meal", location: "大黒家", notes: "人均¥2000日元" }] }]，',
           'segment.type 必须是以下之一：transport（交通）、attraction（景点）、activity（体验活动）、meal（餐饮）、hotel（住宿）、flight（航班），用于前端分类展示。',
           'budgetSummary: { flights: { amount_cny: 6480, label: "机票" }, ..., total_cny: 17964 }，',
-          'reminders: ["出发前完成Visit Japan Web注册", "兑换3万日元现金", "购买旅行保险"] — 行前准备清单，在最终阶段必须写入'
+          'reminders: ["出发前完成Visit Japan Web注册", "兑换3万日元现金", "购买旅行保险"] — 行前准备清单，在最终阶段必须写入，',
+          'practicalInfo: [{ category: "签证", content: "中国护照需提前1-2个月通过旅行社申请，准备在职证明和银行流水", icon: "🛂" }] — AI分析总结的实用信息，按category覆盖更新。常用分类：签证(🛂)、货币支付(💱)、交通出行(🚄)、通讯网络(📱)、气候穿衣(👔)、文化礼仪(🎌)'
         ].join('')
       }
     }
@@ -132,6 +132,7 @@ async function execute(args) {
       days: '每日行程',
       budgetSummary: '预算摘要',
       reminders: '提醒事项',
+      practicalInfo: '实用信息',
     };
     const fields = Object.keys(itinerary);
     const fieldLabels = fields.map(f => ITIN_LABELS[f] || f);

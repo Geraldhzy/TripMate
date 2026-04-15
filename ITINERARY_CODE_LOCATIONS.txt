@@ -1,0 +1,236 @@
+================================================================================
+                    ITINERARY PANEL - CODE LOCATIONS
+================================================================================
+
+public/js/itinerary.js
+─────────────────────────────────────────────────────────────────────────────
+
+STATE OBJECT
+  Lines 5-27:   itineraryState initialization
+                • reminders: []
+                • practicalInfo: []
+
+CLEARING STATE
+  Lines 125-145: clearItinerary()
+                • Resets all fields including reminders and practicalInfo
+
+UPDATE FUNCTIONS
+  Lines 88-120:   updateItinerary(data) - incremental updates
+  Lines 150-208:  updateFromTripBook(data) - full TripBook sync
+                  • Line 188-190: updates reminders
+                  • Line 197-199: updates practicalInfo
+
+MAIN RENDER ORCHESTRATOR
+  Lines 213-254:  renderPanel()
+                  • Calls 7 renderSection* functions in order
+
+RENDER SECTION FUNCTIONS
+  Lines 257-335:  renderSectionHeader()
+                  • Destination, route, info grid, tags, phase status
+
+  Lines 338-345:  renderSectionItinerary()
+                  • Calls renderDaysPlan()
+
+  Lines 348-380:  renderSectionTransport()
+                  • Flight quotes
+                  • Transport segments
+
+  Lines 383-434:  renderSectionHotel()
+                  • Hotel quotes
+                  • Hotel segments
+
+  Lines 437-460:  renderSectionFoodAndAttraction()
+                  • Meal segments
+                  • Attraction segments
+
+  Lines 463-484:  renderSectionBudget()
+                  • Budget summary or budget target
+
+  Lines 487-566:  renderSectionPrepAndInfo() ⭐ MAIN TARGET
+                  
+                  Sub-sections:
+                  Line 500-511:   Weather rendering
+                  Line 514-523:   PRACTICAL INFO (📋) ⭐ REMOVABLE
+                  Line 526-535:   Exchange rates (💱)
+                  Line 538-547:   Special requests (⚠️)
+                  Line 550-560:   REMINDERS/CHECKLIST (📝) ⭐ REMOVABLE
+                                  └─ Creates checkbox list with toggleReminder()
+
+INTERACTION FUNCTIONS
+  Lines 571-574:  toggleReminder(el) ⭐ REMOVABLE
+                  • Handles checkbox toggle for reminders
+
+  Lines 579-590:  toggleDay(dayNum)
+                  • Expands/collapses individual day cards
+
+  Lines 592-603:  toggleAllDays()
+                  • Expands/collapses all day cards
+
+  Lines 605-612:  updateToggleAllText()
+                  • Updates "expand all / collapse all" button text
+
+HELPER FUNCTIONS FOR SEGMENT EXTRACTION
+  Lines 617-630:  extractSegmentsByType(types)
+                  • Filters daysPlan segments by type
+                  • Used by: transport, hotel, food, attraction sections
+
+  Lines 635-657:  renderExtractedSegments(groups, emptyIcon, emptyText)
+                  • Renders grouped segments as cards
+
+RENDERING HELPERS
+  Lines 662-702:  renderDaysPlan(daysPlan)
+                  • Renders collapsible day cards with toggle button
+                  • Calls renderTimeline()
+
+  Lines 707-753:  renderTimeline(segments)
+                  • Renders vertical timeline with dots and lines
+
+  Lines 758-801:  renderBudgetSummary(summary)
+                  • Renders budget breakdown table
+
+TRANSLATION HELPERS
+  Lines 40-56:    WEATHER_ZH object + translateWeather()
+                  • Maps English weather to Chinese
+
+  Lines 58-83:    CITY_ZH object + translateCity()
+                  • Maps English city names to Chinese
+
+UTILITY
+  Lines 806-813:  escItinHtml(str)
+                  • HTML escape function (prevents XSS)
+
+================================================================================
+
+models/trip-book.js
+─────────────────────────────────────────────────────────────────────────────
+
+CLASS INITIALIZATION
+  Lines 21-58:    TripBook class constructor
+                  • this.itinerary.reminders = []
+                  • this.itinerary.practicalInfo = []
+
+LAYER 3: ITINERARY UPDATES
+  Lines 198-249:  updateItinerary(delta)
+                  
+                  Reminders handling:
+                  Lines 233-237:   Adds reminders (set-based deduplication)
+                                   if (Array.isArray(delta.reminders)) {
+                                     const existing = new Set(this.itinerary.reminders);
+                                     delta.reminders.forEach(r => existing.add(r));
+                                     this.itinerary.reminders = Array.from(existing);
+                                   }
+                  
+                  Practical info handling:
+                  Lines 239-248:   Merges practicalInfo (by category)
+                                   if (Array.isArray(delta.practicalInfo)) {
+                                     for (const newItem of delta.practicalInfo) {
+                                       const idx = this.itinerary.practicalInfo
+                                         .findIndex(p => p.category === newItem.category);
+                                       if (idx >= 0) {
+                                         this.itinerary.practicalInfo[idx] = newItem;
+                                       } else {
+                                         this.itinerary.practicalInfo.push(newItem);
+                                       }
+                                     }
+                                   }
+
+SYSTEM PROMPT INJECTION
+  Lines 409-431:  toSystemPromptSection()
+                  • Generates prompt text for AI
+                  • Summarizes: constraints, itinerary, dynamic data
+                  • (Does NOT include specific reminders/practical info text)
+
+PANEL DATA EXPORT ⭐ CRITICAL
+  Lines 441-520:  toPanelData()
+                  
+                  Reminders export:
+                  Line 506:        reminders: it.reminders || []
+                                   • Exports simple array of strings
+                  
+                  Practical info export:
+                  Lines 507-509:   practicalInfo: (it.practicalInfo || []).map(p => ({
+                                     category: p.category, 
+                                     content: p.content, 
+                                     icon: p.icon || '📌',
+                                   }))
+                                   • Maps to { category, content, icon } objects
+
+JSON SERIALIZATION
+  Lines 526-535:  toJSON()
+                  • Serializes entire TripBook to JSON
+
+  Lines 536-553:  static fromJSON(json)
+                  • Deserializes TripBook from JSON
+
+================================================================================
+                              FILES TO MODIFY
+================================================================================
+
+If removing reminders + practicalInfo:
+
+IN public/js/itinerary.js:
+  ─ Delete Lines 22, 26 from itineraryState
+  ─ Delete Lines 132-133 from clearItinerary()
+  ─ Delete Lines 188-190, 197-199 from updateFromTripBook()
+  ─ Delete Lines 514-523 (practicalInfo section)
+  ─ Delete Lines 550-560 (reminders section)
+  ─ Delete Lines 571-574 (toggleReminder function)
+  ─ Modify renderSectionPrepAndInfo() to remove both sections
+
+IN models/trip-book.js:
+  ─ Delete Line 56 from itinerary initialization
+  ─ Delete Lines 233-237 (reminders update)
+  ─ Delete Lines 239-248 (practicalInfo update)
+  ─ Delete Lines 506 from toPanelData()
+  ─ Delete Lines 507-509 from toPanelData()
+
+OPTIONAL - Remove from backend generators:
+  ─ Remove reminders generation from system prompt
+  ─ Remove practicalInfo generation from AI tools
+  ─ (These are in prompts/ and tools/ directories)
+
+================================================================================
+                            DEPENDENCIES TO CHECK
+================================================================================
+
+CSS Classes (public/css/itinerary.css or similar):
+  ─ .reminder-list
+  ─ .reminder-item
+  ─ .reminder-check
+  ─ .prep-card (used for practicalInfo)
+
+HTML Elements:
+  ─ #itinerary-body (main container)
+  ─ All rendered elements injected into body.innerHTML
+
+No external library dependencies:
+  ─ Uses plain HTML string concatenation
+  ─ No React, Vue, or other framework
+  ─ No jQuery
+  ─ Uses vanilla JavaScript event handlers
+
+================================================================================
+                          TESTING CHECKLIST
+================================================================================
+
+Before removing practicalInfo:
+  ☐ Verify no other code references itineraryState.practicalInfo
+  ☐ Verify no CSS depends on .prep-card for practicalInfo only
+  ☐ Verify no server endpoints return practicalInfo
+  ☐ Run tests to ensure Section 7 still renders other subsections
+
+Before removing reminders:
+  ☐ Verify no local storage saves reminders
+  ☐ Verify no other UI components reference reminders
+  ☐ Check if toggleReminder() is called from anywhere else
+  ☐ Run tests to ensure Section 7 still renders other subsections
+  ☐ Verify no user preferences/settings relate to reminders
+
+After removal:
+  ☐ renderPanel() should still render Section 7 if weather/rates/requests exist
+  ☐ clearItinerary() should not error
+  ☐ updateFromTripBook() should handle missing data gracefully
+  ☐ toPanelData() should not error with empty arrays
+  ☐ No console errors in browser DevTools
+
+================================================================================

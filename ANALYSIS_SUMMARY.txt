@@ -1,0 +1,244 @@
+================================================================================
+MAIN AGENT SYSTEM PROMPT ANALYSIS - EXECUTIVE SUMMARY
+================================================================================
+
+FINDING: The main agent is already equipped to call all tools directly when you
+remove the sub-agents. The system prompt structure is clean and well-organized.
+
+================================================================================
+1. MAIN SYSTEM PROMPT BUILDER
+================================================================================
+
+Location: prompts/system-prompt.js (187 lines, 9.3 KB)
+
+Entry Point in server.js (line 178):
+    const systemPrompt = buildSystemPrompt(conversationText, knownRates, 
+                                           knownWeather, tripBook);
+
+How It Works:
+    - Dynamically concatenates 6 major sections
+    - Each section adds context for the main agent's planning
+    - TripBook acts as running state tracker
+
+Assembly Order:
+    1. Current time + holiday calendar
+    2. Cached exchange rates (if no TripBook)
+    3. Cached weather (if no TripBook)
+    4. Core agent instructions (lines 53-156)
+    5. Injected destination knowledge (if cached + mentioned in conversation)
+    6. TripBook reference section (trip state snapshot)
+
+================================================================================
+2. TOOLS ALREADY AVAILABLE TO MAIN AGENT (Lines 121-132)
+================================================================================
+
+✅ All 8 tools are already listed as available to the main agent:
+
+    1. web_search            - General web searching
+    2. get_weather           - Weather forecasts
+    3. get_exchange_rate     - Currency conversion
+    4. search_poi            - Restaurant/attraction location search
+    5. search_flights        - Flight searching
+    6. search_hotels         - Hotel searching
+    7. cache_destination_knowledge - Knowledge storage
+    8. update_trip_info      - Itinerary updates
+
+Current Guidance Level:
+    - Basic: 1-2 line descriptions per tool
+    - Minimal: No detailed strategy for most tools
+    - Gap: Sub-agent-level expertise not yet in main prompt
+
+================================================================================
+3. WHAT SUB-AGENTS CURRENTLY KNOW (MIGRATION TARGETS)
+================================================================================
+
+BOOKING AGENT (agents/prompts/booking.js - 8.2 KB):
+    ├─ Flight Search Strategy (lines 23-78)
+    │   ├─ Airline ecosystem research (multi-carrier, budget airlines)
+    │   ├─ Multi-airport + multi-date searches
+    │   ├─ Budget airline offline research (AirAsia, VietJet, Peach, etc.)
+    │   ├─ Middle-leg routes for niche destinations
+    │   └─ Results presentation (USD→CNY, price comparisons, cheapest vs. comfy)
+    │
+    └─ Hotel Search Strategy (lines 87-143)
+        ├─ Platform discovery per destination
+        ├─ Neighborhood/area research
+        ├─ Price tier differentiation (budget/comfort/luxury)
+        ├─ Hotel-as-destination concept
+        └─ Booking channel recommendations
+
+ACTIVITY AGENT (agents/prompts/activity.js - 8.6 KB):
+    ├─ Restaurant Search Strategy (lines 20-77)
+    │   ├─ Authority sources (Michelin, Asia's 50 Best, Tabelog, etc.)
+    │   ├─ Local review platform discovery
+    │   ├─ POI search with ratings ≥4.0 filter
+    │   ├─ Neighborhood-grouped output
+    │   ├─ Reservation channel lookup
+    │   └─ Special accommodation types (ryokan, capsule, etc.)
+    │
+    └─ Attraction Search Strategy (lines 80-140)
+        ├─ Official tourism authority sites
+        ├─ Ticket purchasing channels (OTAs: Klook, GetYourGuide)
+        ├─ Experience platforms (Airbnb Experiences, local apps)
+        ├─ Duration estimates + best visiting times
+        └─ Geo-clustering for same-day itinerary
+
+KNOWLEDGE AGENT (agents/prompts/knowledge.js - 6.6 KB):
+    ├─ Visa & Entry Research Strategy
+    │   ├─ Official government sources
+    │   ├─ Cross-verification with third-party
+    │   └─ China-specific policies
+    │
+    ├─ Weather Nuance
+    │   ├─ Forecast vs. climate reference distinction
+    │   ├─ Seasonal/typhoon considerations
+    │   └─ Historical data for unpredictable months
+    │
+    ├─ Knowledge Caching Hierarchy
+    │   ├─ National level (visas, currency, language)
+    │   └─ City level (transport, neighborhoods, experiences)
+    │
+    └─ Information Source Discovery
+        ├─ Authority websites per destination
+        ├─ Local platforms
+        └─ Real-time vs. reference data
+
+================================================================================
+4. CURRENT GUIDANCE ALREADY IN MAIN PROMPT
+================================================================================
+
+Existing Tool Guidance (Lines 108-156):
+    ✅ Tool list is already present
+    ✅ Timing guidance exists (when to update_trip_info)
+    ✅ Source attribution rules defined
+    ✅ Segment type classification rules
+    ✅ Round discipline enforced (max 2 topics, max 2 delegations)
+
+Existing Behavioral Rules:
+    ✅ No fabrication allowed (lines 62-63)
+    ✅ Never repeat confirmed info (line 71)
+    ✅ Mark all sources (line 64)
+    ✅ Show prices in USD + CNY (line 65)
+    ✅ Boundary clarity: plan, don't book (lines 72-73)
+
+Key Methodologies:
+    ✅ Progressive planning with 4 phases
+    ✅ Destination knowledge library concept
+    ✅ TripBook as running reference
+
+================================================================================
+5. WHAT'S MISSING FOR DIRECT TOOL CALLING
+================================================================================
+
+Tool-Specific Expertise Gaps:
+
+    search_flights (line 129):
+        ❌ Missing: Multi-airport strategy (SZX+HKG+CAN)
+        ❌ Missing: Budget airline ecosystem knowledge
+        ❌ Missing: ±3 day flexibility strategy
+        ❌ Missing: Parallel batch call guidance
+        ✅ Has: Price conversion reminder
+
+    search_hotels (line 130):
+        ❌ Missing: Platform discovery per destination
+        ❌ Missing: Neighborhood research approach
+        ❌ Missing: Price tier strategy
+        ❌ Missing: Special accommodation types
+        ✅ Has: Basic "search prices" description
+
+    search_poi (line 128):
+        ❌ Missing: Rating threshold (≥4.0)
+        ❌ Missing: Neighborhood vs. city-wide search
+        ❌ Missing: Review count minimum (≥100)
+        ❌ Missing: Category-specific platforms
+        ✅ Has: Basic description
+
+    web_search (line 125):
+        ❌ Missing: Airline ecosystem queries
+        ❌ Missing: Platform discovery queries
+        ❌ Missing: Authority source queries
+        ❌ Missing: Query formulation strategy
+        ✅ Has: Very generic description
+
+    get_weather (line 126):
+        ❌ Missing: Climate vs. forecast distinction
+        ❌ Missing: When to call (before date confirmation)
+        ✅ Has: Required parameters (start_date, end_date)
+
+    get_exchange_rate (line 127):
+        ✅ Has: Deduplication guidance
+        ✅ Has: Usage context
+        ⚠️ Could expand: When to present results
+
+================================================================================
+6. RECOMMENDED MIGRATION APPROACH
+================================================================================
+
+Phase 1: Add Tool Strategies to Main Prompt
+    1. Expand search_flights section (copy from booking.js lines 25-78)
+    2. Expand search_hotels section (copy from booking.js lines 87-143)
+    3. Expand search_poi section (copy from activity.js lines 42-54)
+    4. Consolidate web_search section (combine all 3 agents' guidance)
+    5. Expand get_weather section (add knowledge agent's climate guidance)
+    6. Keep existing exchange_rate guidance
+
+Estimated New Prompt Size:
+    - Current: 9.3 KB
+    - After: 15-20 KB
+    - Trade-off: Fewer API calls (no delegation) vs. larger prompts
+
+Phase 2: Adjust server.js Parameters
+    - Line 447: Consider if MAX_TOOL_ROUNDS (currently 10) is sufficient
+      (May need 15-20 for sequential tool research)
+    - Line 595-602: Delegation count check becomes irrelevant
+    - Optional: Add tool call batching for parallel requests
+
+Phase 3: Test & Monitor
+    - Simple trip (Tokyo 3 days) - should work immediately
+    - Complex trip (multi-city + research) - monitor tool call efficiency
+    - Budget flight search - verify obscure airlines still found
+    - Metrics: Tool calls, response time, token usage vs. before
+
+================================================================================
+7. FILES TO REFERENCE
+================================================================================
+
+Reference Documents Created:
+    ✅ SYSTEM_PROMPT_ANALYSIS.md      - Detailed analysis (this repo)
+    ✅ REFACTORING_QUICK_GUIDE.md     - Step-by-step checklist (this repo)
+    ✅ ANALYSIS_SUMMARY.txt            - This file
+
+Source Code to Migrate From:
+    - agents/prompts/booking.js       - Flight & hotel strategies
+    - agents/prompts/activity.js      - POI & restaurant strategies
+    - agents/prompts/knowledge.js     - Visa, weather, destination strategies
+
+Source Code to Update:
+    - prompts/system-prompt.js        - Add tool strategies (lines 121-156)
+    - server.js                        - Adjust tool limits (lines 101-102, 447)
+
+Source Code to Remove (Later):
+    - agents/delegate.js              - Delegation logic
+    - agents/prompts/*.js             - Agent prompts
+    - tools/index.js                  - Remove delegate from tool list
+
+================================================================================
+8. SUCCESS CRITERIA
+================================================================================
+
+✅ SUCCESS if:
+    - Main agent handles all travel research without sub-agents
+    - Recommendation quality identical or better
+    - Tool call volume ≤ 1.2x of current model
+    - Response time < 30 seconds (typical)
+    - Token usage per trip equal or lower
+
+❌ ROLL BACK if:
+    - Quality noticeably degraded (missed deals, bad recommendations)
+    - Tool round limits hit frequently (>10% of conversations)
+    - Cost per trip increases >20%
+    - User complaints about missing expertise
+
+================================================================================
+END OF SUMMARY
+================================================================================

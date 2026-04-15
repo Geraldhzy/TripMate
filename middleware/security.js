@@ -1,5 +1,6 @@
 const helmet = require('helmet');
 const cors = require('cors');
+const log = require('../utils/logger');
 
 /**
  * Security middleware configuration
@@ -82,13 +83,7 @@ function getCorsConfig() {
  */
 function additionalSecurityHeaders() {
   return (req, res, next) => {
-    // Prevent browsers from MIME-sniffing a response away from the declared Content-Type
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-
-    // Deny framing
-    res.setHeader('X-Frame-Options', 'DENY');
-
-    // Prevent browsers from following MIME type sniffing in some cases
+    // X-UA-Compatible for older IE browsers
     res.setHeader('X-UA-Compatible', 'IE=edge');
 
     // Disallow cross-site tracking
@@ -99,45 +94,12 @@ function additionalSecurityHeaders() {
 }
 
 /**
- * Rate limit error handler
- * Returns proper error format for rate limit errors
- */
-function rateLimitErrorHandler() {
-  return (err, req, res, next) => {
-    if (err.status === 429) {
-      return res.status(429).json({
-        error: '请求过于频繁',
-        details: 'Too many requests, please try again later',
-        retryAfter: err.retryAfter || 60
-      });
-    }
-    next(err);
-  };
-}
-
-/**
- * Validation error handler
- * Formats validation errors properly
- */
-function validationErrorHandler() {
-  return (err, req, res, next) => {
-    if (err.message && err.message.includes('validation')) {
-      return res.status(400).json({
-        error: '请求验证失败',
-        details: err.message
-      });
-    }
-    next(err);
-  };
-}
-
-/**
  * Global error handler
  * Should be last middleware
  */
 function globalErrorHandler() {
   return (err, req, res, next) => {
-    console.error('Global error:', err);
+    log.error('全局未捕获错误', { error: err.message, stack: err.stack });
 
     // Don't leak error details in production
     const isDevelopment = process.env.NODE_ENV === 'development';
@@ -154,7 +116,5 @@ module.exports = {
   getHelmetConfig,
   getCorsConfig,
   additionalSecurityHeaders,
-  rateLimitErrorHandler,
-  validationErrorHandler,
   globalErrorHandler
 };

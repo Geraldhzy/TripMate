@@ -46,14 +46,14 @@ describe('Backend Server Logic', () => {
       tripBook = new TripBook();
     });
 
-    test('should execute weather tool', () => {
-      tripBook.setWeather('Tokyo', {
-        city: 'Tokyo',
-        current: { temp_c: 20, description: 'Sunny' }
+    test('should execute web search tool', () => {
+      tripBook.addWebSearch({
+        query: 'Tokyo weather',
+        summary: 'Sunny, 20°C in May'
       });
-      
-      expect(tripBook.dynamic.weather.tokyo).toBeDefined();
-      expect(tripBook.dynamic.weather.tokyo.current.temp_c).toBe(20);
+
+      expect(tripBook.dynamic.webSearches).toHaveLength(1);
+      expect(tripBook.dynamic.webSearches[0].query).toBe('Tokyo weather');
     });
 
     test('should execute flight search tool', () => {
@@ -89,12 +89,10 @@ describe('Backend Server Logic', () => {
     });
 
     test('should sync tool results to TripBook', () => {
-      tripBook.setWeather('Tokyo', { city: 'Tokyo', current: { temp_c: 20 } });
-      tripBook.setExchangeRate('JPY/USD', 0.0067);
+      tripBook.addWebSearch({ query: 'Tokyo weather', summary: 'Sunny' });
       tripBook.addFlightQuote({ from: 'SFO', to: 'NRT', price_usd: 800 });
-      
+
       const panelData = tripBook.toPanelData();
-      expect(panelData.weather).toBeDefined();
       expect(panelData.flights).toBeDefined();
     });
   });
@@ -133,11 +131,11 @@ describe('Backend Server Logic', () => {
     });
 
     test('should combine multi-layer updates', () => {
-      tripBook.setWeather('Tokyo', { city: 'Tokyo', current: { temp_c: 20 } });
+      tripBook.addWebSearch({ query: 'Tokyo weather', summary: 'Sunny' });
       tripBook.addFlightQuote({ from: 'SFO', to: 'NRT', price_usd: 800 });
       tripBook.updateConstraints({ destination: { value: 'Japan' } });
       tripBook.updateItinerary({ route: ['Tokyo', 'Kyoto'] });
-      
+
       const panelData = tripBook.toPanelData();
       expect(panelData.flights).toHaveLength(1);
       expect(panelData.route).toHaveLength(2);
@@ -194,10 +192,11 @@ describe('Backend Server Logic', () => {
       }).not.toThrow();
     });
 
-    test('should handle null results', () => {
+    test('should handle null updates gracefully', () => {
       const tripBook = new TripBook();
-      tripBook.setWeather('Tokyo', null);
-      expect(tripBook.dynamic.weather.tokyo).toBeNull();
+      expect(() => {
+        tripBook.updateConstraints(null);
+      }).not.toThrow();
     });
 
     test('should handle malformed updates', () => {

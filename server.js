@@ -1,20 +1,17 @@
 const express = require('express');
 const path = require('path');
 const { OpenAI } = require('openai');
-const Anthropic = require('@anthropic-ai/sdk');
 const { v4: uuidv4 } = require('uuid');
 const rateLimit = require('express-rate-limit');
 const Sentry = require('@sentry/node');
 const { validate, sanitizeBody, validateHeaders, chatRequestSchema } = require('./middleware/validation');
 const { getHelmetConfig, getCorsConfig, additionalSecurityHeaders, globalErrorHandler } = require('./middleware/security');
-const { getToolDefinitions, executeToolCall, getToolDefinitionsForAnthropic } = require('./tools');
+const { getToolDefinitions, getMainAgentToolDefinitions, executeToolCall, SUB_AGENT_EXCLUSIVE_TOOLS } = require('./tools');
 const { buildSystemPrompt } = require('./prompts/system-prompt');
-const { getCachedRates } = require('./tools/exchange-rate');
-const { getCachedWeather } = require('./tools/weather');
 const { TripBook } = require('./models/trip-book');
-const { initCache: initDestCache } = require('./tools/dest-knowledge');
 const { executeDelegation } = require('./agents/delegate');
 const log = require('./utils/logger');
+const { DEFAULT_MODELS } = require('./utils/constants');
 
 const app = express();
 
@@ -29,10 +26,7 @@ if (process.env.SENTRY_DSN) {
     debug: process.env.SENTRY_DEBUG === 'true'
   });
 
-  // Sentry request handler middleware (must be first)
   app.use(Sentry.Handlers.requestHandler());
-
-  // Sentry transaction middleware for performance monitoring
   app.use(Sentry.Handlers.tracingHandler());
 }
 
@@ -40,14 +34,11 @@ if (process.env.SENTRY_DSN) {
 // Security Middleware Setup
 // ============================================================
 
-// Helmet - set security headers
 app.use(getHelmetConfig());
 
-// CORS - handle cross-origin requests
 const corsConfig = getCorsConfig();
 app.use(require('cors')(corsConfig));
 
-// Additional custom security headers
 app.use(additionalSecurityHeaders());
 
 // ============================================================
@@ -58,7 +49,6 @@ app.use(express.static(path.join(__dirname, 'public'), {
   etag: false,
   lastModified: false,
   setHeaders: (res, filePath) => {
-    // 开发阶段禁用缓存，确保浏览器始终获取最新文件
     if (filePath.endsWith('.js') || filePath.endsWith('.css') || filePath.endsWith('.html')) {
       res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
       res.setHeader('Pragma', 'no-cache');
@@ -67,7 +57,6 @@ app.use(express.static(path.join(__dirname, 'public'), {
   }
 }));
 
-// Input sanitization middleware
 app.use(sanitizeBody());
 
 const PORT = process.env.PORT || 3000;
@@ -76,19 +65,17 @@ const PORT = process.env.PORT || 3000;
 // Rate Limiting Configuration
 // ============================================================
 
-// General rate limiter: 100 requests per hour per IP
 const generalLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 hour
+  windowMs: 60 * 60 * 1000,
   max: 100,
   message: { error: '请求过于频繁，请稍后再试' },
-  standardHeaders: true, // Return rate limit info in `RateLimit-*` headers
-  legacyHeaders: false, // Disable `X-RateLimit-*` headers
-  skip: (req) => req.headers['x-skip-rate-limit'] === process.env.RATE_LIMIT_BYPASS_KEY, // Allow bypass with special header
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.headers['x-skip-rate-limit'] === process.env.RATE_LIMIT_BYPASS_KEY,
 });
 
-// Chat-specific rate limiter: 20 messages per hour per IP
 const chatLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 hour
+  windowMs: 60 * 60 * 1000,
   max: 20,
   message: { error: '您的对话请求过于频繁，请稍后再试' },
   standardHeaders: true,
@@ -96,9 +83,8 @@ const chatLimiter = rateLimit({
   skip: (req) => req.headers['x-skip-rate-limit'] === process.env.RATE_LIMIT_BYPASS_KEY,
 });
 
-// Tool execution rate limiter: 50 per hour per IP
 const toolLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 hour
+  windowMs: 60 * 60 * 1000,
   max: 50,
   message: { error: '工具调用请求过于频繁，请稍后再试' },
   standardHeaders: true,
@@ -106,26 +92,20 @@ const toolLimiter = rateLimit({
   skip: (req) => req.headers['x-skip-rate-limit'] === process.env.RATE_LIMIT_BYPASS_KEY,
 });
 
-// Apply general rate limiter to all routes
 app.use(generalLimiter);
 
 // ============================================================
 // POST /api/chat — Agent 核心路由（SSE 流式）
 // ============================================================
 app.post('/api/chat', validateHeaders(), validate(chatRequestSchema), chatLimiter, toolLimiter, async (req, res) => {
-  const { messages, provider, model, knownRates: bodyRates, knownWeather: bodyWeather, tripBookSnapshot } = req.body;
+  const { messages, provider, model, tripBookSnapshot } = req.body;
   const apiKey = req.headers['x-api-key'];
   const baseUrl = req.headers['x-base-url'] || '';
 
-  // 为本次请求创建带唯一 ID 的 logger
   const reqId = log.generateId();
   const reqLog = log.child({ reqId });
   const reqTimer = reqLog.startTimer('request');
   reqLog.info('收到请求', { provider, model, msgCount: messages?.length });
-
-  // 客户端通过 body 传来的已知汇率/天气缓存
-  const clientRates = Array.isArray(bodyRates) ? bodyRates : [];
-  const clientWeather = Array.isArray(bodyWeather) ? bodyWeather : [];
 
   // SSE 头
   res.setHeader('Content-Type', 'text/event-stream');
@@ -139,93 +119,13 @@ app.post('/api/chat', validateHeaders(), validate(chatRequestSchema), chatLimite
   };
 
   try {
-    // ── 创建本次请求的 TripBook 实例 ──
     const tripBook = new TripBook();
 
-    // 合并服务端内存缓存 + 客户端缓存的汇率，去重（以 from_to 为 key，服务端优先）
-    const now = Date.now();
-    const RATE_TTL = 4 * 60 * 60 * 1000;
-    const rateMap = new Map();
-    // 先加客户端缓存（可能已过期）
-    for (const r of clientRates) {
-      if (r.fetched_at && (now - r.fetched_at) < RATE_TTL) {
-        rateMap.set(`${r.from}_${r.to}`, r);
-      }
-    }
-    // 服务端缓存覆盖（更权威）
-    for (const r of getCachedRates()) {
-      rateMap.set(`${r.from}_${r.to}`, r);
-    }
-    const knownRates = Array.from(rateMap.values());
-
-    // 合并天气缓存：客户端 + 服务端
-    const WEATHER_TTL = 3 * 60 * 60 * 1000;
-    const weatherMap = new Map();
-    for (const w of clientWeather) {
-      if (w.fetched_at && (now - w.fetched_at) < WEATHER_TTL) {
-        weatherMap.set((w.city || '').toLowerCase(), w);
-      }
-    }
-    for (const w of getCachedWeather()) {
-      weatherMap.set((w.city || '').toLowerCase(), w);
-    }
-    const knownWeather = Array.from(weatherMap.values());
-
-    // 将已知汇率同步到 TripBook（汇率是全局有用的）
-    for (const r of knownRates) {
-      tripBook.setExchangeRate(`${r.from}_${r.to}`, {
-        from: r.from, to: r.to, rate: r.rate,
-        last_updated: r.last_updated,
-        _meta: { fetched_at: r.fetched_at, ttl: RATE_TTL }
-      });
-    }
-    // 注意：不将客户端缓存的天气自动注入 TripBook，避免旧行程天气（如清迈）
-    // 污染新行程面板。天气仍通过 knownWeather 注入系统提示防止重复查询，
-    // TripBook 天气仅在 AI 本次调用 get_weather 时通过 setWeather 写入。
-
-    /**
-     * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-     * TripBook 生命周期管理
-     * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-     * 
-     * TripBook 是 single source of truth，跨越请求周期的持久化依赖：
-     * 
-     * REQUEST 1（初始请求）:
-     *   1. 新建 TripBook 实例（server.js line 136）
-     *   2. AI 调用 update_trip_info 工具 → constraints 写入 TripBook
-     *   3. server.js line 389-392: 发送 SSE tripbook_update 事件，附带 _snapshot
-     *   4. chat.js line 383: 客户端存储 snapshot 到 sessionStorage
-     * 
-     * REQUEST 2（后续请求）:
-     *   1. 新建 TripBook 实例（server.js line 136）
-     *   2. chat.js line 149-150: 从 sessionStorage 读取 snapshot，随请求发送
-     *   3. server.js line 180-195: 尝试恢复 snapshot (THIS SECTION)
-     *   4. 如果恢复成功 → TripBook 有数据 → 系统提示包含"用户已确认信息"
-     *   5. 如果恢复失败 → TripBook 空白 → 系统提示缺少"用户已确认信息"
-     *      → AI 重新询问用户的已确认信息（BUG）
-     *   6. server.js line 198: buildSystemPrompt(tripBook) 取决于 TripBook 状态
-     * 
-     * CRITICAL ROOT CAUSE:
-     *   - 如果 JSON.parse 失败或 updateConstraints 异常，错误被捕获但不重新抛出
-     *   - TripBook 保持空白状态，系统提示无"已确认信息"部分
-     *   - "严禁重复询问"规则在系统提示中，但没有已确认信息可参考
-     *   - 结果：AI 看不到用户的确认信息，重新开始提问
-     * 
-     * DEBUGGING:
-     *   - 服务器日志: 查找 "[TripBook] Snapshot restoration failed" 错误
-     *   - 客户端日志: 查找 "[Chat] Failed to parse TripBook snapshot" 警告
-     *   - SSE 流量: 检查 tripbook_update 事件是否包含完整 _snapshot
-     *   - 系统提示: 新请求中是否包含"用户已确认信息"部分
-     * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-     */
-    // 尝试从客户端传来的 TripBook 快照恢复约束和行程状态
+    // 从客户端快照恢复 TripBook 状态
     try {
       if (tripBookSnapshot) {
         if (tripBookSnapshot.constraints) tripBook.updateConstraints(tripBookSnapshot.constraints);
         if (tripBookSnapshot.itinerary) tripBook.updateItinerary(tripBookSnapshot.itinerary);
-        if (tripBookSnapshot.knowledgeRefs) {
-          for (const ref of tripBookSnapshot.knowledgeRefs) tripBook.addKnowledgeRef(ref);
-        }
       }
     } catch (err) {
       reqLog.error('TripBook 快照恢复失败', {
@@ -236,21 +136,15 @@ app.post('/api/chat', validateHeaders(), validate(chatRequestSchema), chatLimite
     }
 
     const conversationText = messages.map(m => m.content || '').join(' ');
-    const systemPrompt = buildSystemPrompt(conversationText, knownRates, knownWeather, tripBook);
+    const systemPrompt = buildSystemPrompt(conversationText, tripBook);
 
     let fullText = '';
     reqLog.info('开始 LLM 调用', { provider, model });
-    if (provider === 'anthropic') {
-      fullText = await handleAnthropicChat(apiKey, model, systemPrompt, messages, sendSSE, baseUrl, tripBook, 'anthropic', reqLog) || '';
-    } else if (provider === 'deepseek') {
-      const dsBaseUrl = baseUrl || 'https://api.deepseek.com/v1';
-      fullText = await handleOpenAIChat(apiKey, model, systemPrompt, messages, sendSSE, dsBaseUrl, tripBook, 'deepseek', reqLog) || '';
-    } else {
-      fullText = await handleOpenAIChat(apiKey, model, systemPrompt, messages, sendSSE, baseUrl, tripBook, 'openai', reqLog) || '';
-    }
+    const effectiveBaseUrl = (provider === 'deepseek') ? (baseUrl || 'https://api.deepseek.com/v1') : baseUrl;
+    fullText = await handleChat(apiKey, model, systemPrompt, messages, sendSSE, effectiveBaseUrl, tripBook, reqLog) || '';
 
-    // Quick Replies 检测：从 AI 回复中提取可点击选项
-    const quickReplies = extractQuickReplies(fullText, tripBook);
+    // Quick Replies 检测
+    const quickReplies = extractQuickReplies(fullText);
     if (quickReplies.length > 0) {
       sendSSE('quick_replies', { questions: quickReplies });
     }
@@ -259,7 +153,6 @@ app.post('/api/chat', validateHeaders(), validate(chatRequestSchema), chatLimite
     reqTimer.done({ provider, model, responseLen: fullText.length });
   } catch (err) {
     reqLog.error('请求处理失败', { error: err.message, stack: err.stack });
-    // Capture error in Sentry
     if (process.env.SENTRY_DSN) {
       Sentry.captureException(err, {
         tags: { context: 'chat_endpoint' }
@@ -272,45 +165,26 @@ app.post('/api/chat', validateHeaders(), validate(chatRequestSchema), chatLimite
 });
 
 // ============================================================
-// 工具执行辅助：执行并推送结果，汇率工具额外推送缓存事件
+// 工具执行辅助
 // ============================================================
 
-/** 从工具结果中提取人类可读的简短标签，供前端 done 状态显示 */
+/** 从工具结果中提取人类可读的简短标签 */
 function getToolResultLabel(funcName, funcArgs, resultStr) {
   try {
     const data = JSON.parse(resultStr);
-    if (data.error) return null; // 出错时不生成标签，让前端显示默认
+    if (data.error) return null;
     switch (funcName) {
       case 'web_search': {
         const count = data.results?.length || 0;
         const q = (funcArgs.query || '').substring(0, 20);
         return `找到 ${count} 条结果：「${q}${funcArgs.query?.length > 20 ? '…' : ''}」`;
       }
-      case 'get_weather': {
-        if (data.forecast && data.forecast.length > 0) {
-          const range = data.query_range ? `${data.query_range.start} ~ ${data.query_range.end}` : '';
-          const temps = data.forecast.map(d => d.max_temp_c).filter(Boolean);
-          const avgHigh = temps.length ? Math.round(temps.reduce((a, b) => a + b, 0) / temps.length) : '?';
-          const typeLabel = data.data_type === 'climate_reference' ? '（历史参考）' : '';
-          return `${data.city} ${range} 平均高温 ${avgHigh}°C${typeLabel}`;
-        }
-        return `${data.city || ''} 天气已获取`;
-      }
-      case 'get_exchange_rate': {
-        if (data.rate) {
-          return `1 ${data.from} ≈ ${data.rate} ${data.to}`;
-        }
-        return null;
-      }
       case 'search_poi': {
         const count = Array.isArray(data.results) ? data.results.length : (Array.isArray(data) ? data.length : 0);
         return `找到 ${count} 个地点`;
       }
-      case 'cache_destination_knowledge': {
-        return `已缓存「${data.destination || ''}」知识库`;
-      }
       case 'update_trip_info': {
-        return data.message || '已更新行程参考书';
+        return data.message || null;
       }
       default:
         return null;
@@ -324,6 +198,15 @@ async function runTool(funcName, funcArgs, toolId, sendSSE, tripBook, delegateCt
   const toolLog = (reqLog || log).child({ tool: funcName });
   const toolTimer = toolLog.startTimer(`tool:${funcName}`);
 
+  // ── 子 Agent 独占工具拦截：主 Agent 禁止直接调用 ──
+  if (SUB_AGENT_EXCLUSIVE_TOOLS.has(funcName)) {
+    toolLog.warn('主Agent尝试调用子Agent独占工具，已拦截', { tool: funcName });
+    sendSSE('tool_start', { id: toolId, name: funcName, arguments: funcArgs });
+    const errMsg = `⚠️ ${funcName} 是子Agent独占工具，主Agent不可直接调用。请使用 delegate_to_agents 将任务委派给对应的子Agent。`;
+    sendSSE('tool_result', { id: toolId, name: funcName, resultLabel: '已拦截：请使用委派' });
+    return errMsg;
+  }
+
   // ── delegate_to_agents 特殊处理 ──
   if (funcName === 'delegate_to_agents') {
     sendSSE('tool_start', { id: toolId, name: funcName, arguments: funcArgs });
@@ -334,7 +217,20 @@ async function runTool(funcName, funcArgs, toolId, sendSSE, tripBook, delegateCt
         funcArgs.tasks, provider, apiKey, model, sendSSE, baseUrl, undefined, reqLog
       );
       toolTimer.done({ resultLen: resultStr.length });
-      sendSSE('tool_result', { id: toolId, name: funcName, resultLabel: '子Agent调研完成' });
+
+      // 动态生成 resultLabel：根据实际返回的子 Agent 结果汇总
+      let delegateLabel = '委派完成';
+      try {
+        const parsed = JSON.parse(resultStr);
+        if (parsed.results && Array.isArray(parsed.results)) {
+          const labels = parsed.results.map(r => {
+            const agentLabel = r.agent === 'flight' ? '✈️ 机票搜索' : r.agent === 'research' ? '📋 目的地调研' : r.agent;
+            return r.status === 'success' ? `${agentLabel}完成` : `${agentLabel}失败`;
+          });
+          delegateLabel = labels.join(' · ');
+        }
+      } catch {}
+      sendSSE('tool_result', { id: toolId, name: funcName, resultLabel: delegateLabel });
       return resultStr;
     } catch (err) {
       toolLog.error('委派执行失败', { error: err.message, stack: err.stack });
@@ -347,13 +243,17 @@ async function runTool(funcName, funcArgs, toolId, sendSSE, tripBook, delegateCt
   sendSSE('tool_start', { id: toolId, name: funcName, arguments: funcArgs });
   toolLog.debug('开始执行', { args: JSON.stringify(funcArgs).slice(0, 200) });
   try {
-    const result = await executeToolCall(funcName, funcArgs);
+    const result = await withTimeout(
+      executeToolCall(funcName, funcArgs),
+      TOOL_TIMEOUT_MS,
+      `工具 ${funcName}`
+    );
     const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
     const resultLabel = getToolResultLabel(funcName, funcArgs, resultStr);
     toolTimer.done({ resultLen: resultStr.length, label: resultLabel });
     sendSSE('tool_result', {
       id: toolId, name: funcName,
-      resultLabel  // 可能为 null，前端降级到默认标签
+      resultLabel
     });
 
     // ── 将工具结果同步到 TripBook ──
@@ -361,28 +261,8 @@ async function runTool(funcName, funcArgs, toolId, sendSSE, tripBook, delegateCt
       try {
         const parsed = JSON.parse(resultStr);
 
-        // 汇率结果 → TripBook + 客户端缓存
-        if (funcName === 'get_exchange_rate' && parsed.rate && !parsed.error) {
-          sendSSE('rate_cached', parsed);
-          tripBook.setExchangeRate(`${parsed.from}_${parsed.to}`, {
-            from: parsed.from, to: parsed.to, rate: parsed.rate,
-            last_updated: parsed.last_updated,
-            _meta: { fetched_at: parsed.fetched_at || Date.now(), ttl: 4 * 3600000 }
-          });
-        }
-
-        // 天气结果 → TripBook + 客户端缓存
-        if (funcName === 'get_weather' && !parsed.error) {
-          sendSSE('weather_cached', parsed);
-          tripBook.setWeather(parsed.city || '', {
-            city: parsed.city, current: parsed.current, forecast: parsed.forecast,
-            _meta: { fetched_at: parsed.fetched_at || Date.now(), ttl: 3 * 3600000 }
-          });
-        }
-
         // 机票报价 → TripBook
         if (funcName === 'search_flights' && Array.isArray(parsed.flights)) {
-          // origin/destination/date 在顶层，不在每条 flight 里
           const route = `${parsed.origin || funcArgs.origin || '?'} → ${parsed.destination || funcArgs.destination || '?'}`;
           const flightDate = parsed.date || funcArgs.date || '';
           for (const f of parsed.flights) {
@@ -407,15 +287,9 @@ async function runTool(funcName, funcArgs, toolId, sendSSE, tripBook, delegateCt
           }
         }
 
-        // 目的地知识 → TripBook 知识引用
-        if (funcName === 'cache_destination_knowledge' && parsed.destination) {
-          tripBook.addKnowledgeRef(parsed.destination);
-        }
-
-        // web_search → TripBook 搜索记录（避免 LLM 重复搜索相同主题）
+        // web_search → TripBook 搜索记录（避免 LLM 重复搜索）
         if (funcName === 'web_search' && !parsed.error) {
           const query = funcArgs.query || parsed.query || '';
-          // 提取首条结果的标题作为摘要
           const firstResult = Array.isArray(parsed.results) && parsed.results[0];
           const summary = firstResult
             ? `找到 ${parsed.results.length} 条结果，首条: ${(firstResult.title || '').slice(0, 60)}`
@@ -435,17 +309,15 @@ async function runTool(funcName, funcArgs, toolId, sendSSE, tripBook, delegateCt
           if (updates.itinerary) {
             tripBook.updateItinerary(updates.itinerary);
           }
-          // 推送 TripBook 面板数据到前端（附加完整快照供持久化）
           sendSSE('tripbook_update', {
             ...tripBook.toPanelData(),
-            _snapshot: tripBook.toJSON()   // 完整结构化数据，含 constraints/itinerary/dynamic
+            _snapshot: tripBook.toJSON()
           });
         }
       } catch (err) {
-      reqLog.error('TripBook 快照恢复失败', {
+      reqLog.error('TripBook 工具结果同步失败', {
         error: err.message,
-        stack: err.stack,
-        snapshot: tripBookSnapshot ? JSON.stringify(tripBookSnapshot).slice(0, 300) : 'null'
+        stack: err.stack
       });
     }
     }
@@ -455,7 +327,6 @@ async function runTool(funcName, funcArgs, toolId, sendSSE, tripBook, delegateCt
     toolLog.error('工具执行失败', { error: toolErr.message, stack: toolErr.stack });
     const errMsg = `工具 ${funcName} 执行失败: ${toolErr.message}`;
     sendSSE('tool_result', { id: toolId, name: funcName, resultLabel: null });
-    // Capture tool execution errors in Sentry
     if (process.env.SENTRY_DSN) {
       Sentry.captureException(toolErr, {
         tags: { context: 'tool_execution', tool: funcName }
@@ -466,252 +337,220 @@ async function runTool(funcName, funcArgs, toolId, sendSSE, tripBook, delegateCt
 }
 
 // ============================================================
-// Quick Replies 检测：从 AI 回复中提取可交互选项
+// Quick Replies 检测
 // ============================================================
-
-/** 预定义问题模式 → 选项映射 */
-const QUICK_REPLY_PATTERNS = [
-  {
-    // 出发城市
-    test: /(?:从哪.*出发|出发城市|出发地|哪个城市出发|从哪里?(?:出发|飞)|您将从哪)/,
-    text: '出发城市？',
-    options: ['北京', '上海', '广州', '深圳', '成都', '杭州'],
-    allowInput: true,
-    inputPlaceholder: '输入其他城市',
-    constraintField: 'departCity'
-  },
-  {
-    // 出发时间
-    test: /(?:计划何时出发|什么时候出发|出发日期|出行时间|打算.*几月|哪个时间段)/,
-    text: '出发时间？',
-    options: ['五一假期', '端午假期', '暑假', '国庆假期'],
-    allowInput: true,
-    inputPlaceholder: '输入具体日期',
-    constraintField: 'dates'
-  },
-  {
-    // 日期弹性
-    test: /(?:日期.*弹性|日期.*调整|时间.*灵活|日期.*固定|能否.*调整|接受前后调整|是否灵活)/,
-    text: '日期可以弹性调整吗？',
-    options: ['可以前后调1-2天', '日期固定不能变'],
-    constraintField: 'dates',
-    subField: 'flexible'
-  },
-  {
-    // 请假天数
-    test: /(?:最多.*请.*假|可以请几天假|请假.*天数)/,
-    text: '最多能请几天假？',
-    options: ['不请假（纯假期）', '1-2天', '3-5天', '可以灵活安排'],
-    constraintField: 'dates',
-    subField: 'notes'
-  },
-  {
-    // 人数
-    test: /(?:几个人|多少人|几人同行|同行.*人数|出行人数|几位.*出行)/,
-    text: '几个人出行？',
-    options: ['1人', '2人', '3-4人', '5人以上'],
-    constraintField: 'people'
-  },
-  {
-    // 同行人员特殊需求（老人/儿童）
-    test: /(?:老人.*儿童|儿童.*老人|特殊需求|同行.*(?:老人|小孩|儿童|孕妇)|是否有.*(?:老人|儿童))/,
-    text: '同行人员情况？',
-    options: ['全部成人', '有老人', '有儿童', '有老人和儿童'],
-    multiSelect: true,
-    constraintField: 'people',
-    subField: 'details'
-  },
-  {
-    // 预算
-    test: /(?:预算.*多少|预算.*范围|大概.*预算|费用.*预期|预算上限|预算细节)/,
-    text: '预算大概多少（每人）？',
-    options: ['5000以内', '1万左右', '2万左右', '3万以上'],
-    allowInput: true,
-    inputPlaceholder: '输入具体预算',
-    constraintField: 'budget'
-  },
-  {
-    // 预算是否含机票住宿
-    test: /(?:是否已?包含机票|包含.*住宿.*费用|预算.*包含|是否含.*机票)/,
-    text: '预算是否包含机票住宿？',
-    options: ['包含所有费用', '不含机票', '不含机票和住宿'],
-    constraintField: 'budget',
-    subField: 'scope'
-  },
-  {
-    // 单人预算 vs 总预算
-    test: /(?:单人.*还是.*总|人均.*还是.*总|家庭总预算|双人.*预算)/,
-    text: '预算是人均还是总预算？',
-    options: ['人均预算', '总预算（含所有人）'],
-    constraintField: 'budget',
-    subField: 'per_person'
-  },
-  {
-    // 红眼航班
-    test: /(?:接受.*红眼|红眼航班|凌晨.*航班|深夜.*航班)/,
-    text: '是否接受红眼航班？',
-    options: ['可以接受', '尽量避免', '完全不接受'],
-    constraintField: 'preferences',
-    subField: 'notes'
-  },
-  {
-    // 住宿偏好
-    test: /(?:住宿.*偏好|酒店.*类型|住.*什么.*档次|住宿.*预算|经济型.*舒适型|酒店.*民宿)/,
-    text: '住宿偏好？',
-    options: ['经济型', '舒适型', '高档/度假村', '特色民宿'],
-    multiSelect: true,
-    allowInput: true,
-    inputPlaceholder: '其他要求',
-    constraintField: 'preferences'
-  },
-  {
-    // 旅行风格/偏好
-    test: /(?:旅行.*风格|偏好.*类型|喜欢.*什么.*玩|想.*怎么.*玩|特别想去.*景点|必去.*景点)/,
-    text: '旅行风格偏好？',
-    options: ['休闲度假', '深度文化', '户外探险', '美食购物'],
-    multiSelect: true,
-    allowInput: true,
-    inputPlaceholder: '其他偏好',
-    constraintField: 'preferences'
-  },
-  {
-    // 餐饮要求
-    test: /(?:餐饮.*要求|对餐饮|美食.*为主|饮食.*偏好|预算限制.*餐)/,
-    text: '餐饮偏好？',
-    options: ['尝试当地美食', '有预算限制', '无特殊要求'],
-    multiSelect: true,
-    constraintField: 'preferences'
-  }
-];
-
-/**
- * 从 AI 回复中提取可交互选项
- * 层1：预定义问题模式匹配——扫描全文，多个问题可同时命中
- * 层2：编号列表检测（2-6项，每项≤40字）——仅在层1无命中时触发
- */
-function extractQuickReplies(text, tripBook) {
+function extractQuickReplies(text) {
   if (!text || text.length < 10) return [];
-  const questions = [];
 
-  // ── 层1：预定义问题模式匹配（扫描全文，允许多个命中）──
-  for (const pattern of QUICK_REPLY_PATTERNS) {
-    // 如果该字段在 TripBook 中已有值，跳过（避免重复提问）
-    if (pattern.constraintField && tripBook) {
-      const c = tripBook.constraints[pattern.constraintField];
-      if (c) {
-        // 如果指定了 subField，只检查对应子字段是否已有值
-        if (pattern.subField) {
-          const val = c[pattern.subField];
-          if (val != null && val !== '' && val !== false) continue;
-        } else {
-          // 无 subField 时按字段类型检查主值
-          if (pattern.constraintField === 'preferences') {
-            if (c.tags?.length > 0) continue;
-          } else if (pattern.constraintField === 'dates') {
-            if (c.start || c.days) continue;
-          } else if (pattern.constraintField === 'people') {
-            if (c.count) continue;
-          } else {
-            if (c.value != null && c.value !== '') continue;
-          }
-        }
-      }
-    }
-
-    if (pattern.test.test(text)) {
-      const q = { text: pattern.text, options: [...pattern.options] };
-      if (pattern.allowInput) {
-        q.allowInput = true;
-        q.inputPlaceholder = pattern.inputPlaceholder || '请输入';
-      }
-      if (pattern.multiSelect) {
-        q.multiSelect = true;
-      }
-      questions.push(q);
-    }
-  }
-
-  // 层1 命中时直接返回（最多保留 5 组，避免过长）
-  if (questions.length > 0) {
-    return questions.slice(0, 5);
-  }
-
-  // ── 层2：编号列表检测（仅在层1未命中时触发）──
-  // 匹配 "1. XXX" 或 "1、XXX" 或 "1）XXX" 格式的编号列表
-  const listPattern = /(?:^|\n)\s*(\d+)\s*[.、）)]\s*(.+)/g;
+  const searchArea = text.slice(-800);
+  const listPattern = /^\s*(\d+)[.、)）]\s*(.+)/gm;
   const items = [];
   let match;
-  // 只在末尾 800 字符中搜索
-  const searchArea = text.slice(-800);
+
   while ((match = listPattern.exec(searchArea)) !== null) {
-    const itemText = match[2].replace(/\*\*/g, '').trim();
-    // 过滤：每项不超过 40 字，排除太长的段落描述
-    // 过滤：包含问号的是子问题，不是可选选项
-    if (itemText.length > 0 && itemText.length <= 40 && !/[？?]/.test(itemText)) {
-      items.push(itemText);
-    }
-  }
-  // 至少2个，最多6个选项
-  if (items.length >= 2 && items.length <= 6) {
-    // 检测列表前面是否有问句（末尾区域有 ？ 或 ?）
-    const beforeList = searchArea.slice(0, searchArea.indexOf(items[0]));
-    const hasQuestion = /[？?]\s*$/.test(beforeList.trim()) || /[？?]/.test(beforeList.slice(-80));
-    if (hasQuestion) {
-      questions.push({ text: '', options: items });
-    }
+    const label = match[2].replace(/\*\*/g, '').trim();
+    if (label.length === 0 || label.length > 40) continue;
+    if (/[？?]/.test(label)) continue;
+    items.push({ label, value: label });
   }
 
-  return questions;
+  if (items.length < 2) return [];
+  return items.slice(0, 4);
 }
 
 // ============================================================
-// OpenAI Agent 循环
+// OpenAI Streaming + Agent Chat Loop
 // ============================================================
-async function handleOpenAIChat(apiKey, model, systemPrompt, userMessages, sendSSE, baseUrl, tripBook, provider, reqLog) {
-  const chatLog = (reqLog || log).child({ provider: provider || 'openai' });
-  const clientOpts = { apiKey };
-  if (baseUrl) clientOpts.baseURL = baseUrl;
-  const client = new OpenAI(clientOpts);
-  const tools = getToolDefinitions();
-  const selectedModel = model || 'gpt-4o';
 
-  const messages = [
-    { role: 'system', content: systemPrompt },
-    ...userMessages
-  ];
+function withTimeout(promise, ms, label = 'operation') {
+  let timeoutId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(`${label} 超时 (${ms / 1000}s)`)), ms);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timeoutId));
+}
 
-  const MAX_TOOL_ROUNDS = 10;
-  let delegationCount = 0; // 防止主 Agent 反复委派
+const LLM_TIMEOUT_MS = 120000;
+const TOOL_TIMEOUT_MS = 30000;
 
-  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    chatLog.info(`主Agent轮次 ${round + 1}/${MAX_TOOL_ROUNDS}`, { msgCount: messages.length });
-    const llmTimer = chatLog.startTimer('llm_call');
-    // 真流式调用
-    const stream = await client.chat.completions.create({
-      model: selectedModel,
-      messages,
-      tools,
-      tool_choice: 'auto',
-      temperature: 0.7,
-      max_tokens: 4096,
-      stream: true,
-    });
+// ============================================================
+// DSML 解析器：将 DeepSeek 原生 DSML 格式转换为 OpenAI tool_calls
+// ============================================================
 
-    let fullText = '';
-    const toolCallsMap = {}; // index -> 累积的 tool_call
+/**
+ * 检测文本中是否包含 DSML 格式的 function call
+ * DeepSeek 模型（尤其 R1）可能将 tool call 以 DSML XML 标签输出到 content 中，
+ * 而不是通过 OpenAI 兼容的 delta.tool_calls 字段返回。
+ */
+function containsDSML(text) {
+  if (!text) return false;
+  // 匹配全角竖线 ｜(U+FF5C) 和半角竖线 | 两种变体
+  return /(?:<[｜|]\s*DSML[｜|]\s*function_calls\s*>|<[｜|]\s*DSML[｜|]\s*invoke\b)/i.test(text);
+}
 
+/**
+ * 从文本中解析 DSML 格式的 function calls，转换为 OpenAI tool_calls 结构
+ * @param {string} text - 包含 DSML 标签的 LLM 输出文本
+ * @returns {{ toolCalls: Array<{id: string, name: string, args: object}>, rawToolCalls: Array, cleanText: string }}
+ */
+function parseDSMLToolCalls(text) {
+  if (!text) return { toolCalls: [], rawToolCalls: [], cleanText: text };
+
+  // 支持全角 ｜ 和半角 | 两种变体
+  const SEP = '[｜|]';
+
+  // 匹配整个 <｜DSML｜function_calls>...</｜DSML｜function_calls> 块
+  const blockRegex = new RegExp(
+    `<${SEP}\\s*DSML${SEP}\\s*function_calls\\s*>[\\s\\S]*?<\\/${SEP}\\s*DSML${SEP}\\s*function_calls\\s*>`,
+    'g'
+  );
+
+  // 匹配每个 <｜DSML｜invoke name="...">...</｜DSML｜invoke> 调用
+  const invokeRegex = new RegExp(
+    `<${SEP}\\s*DSML${SEP}\\s*invoke\\s+name="([^"]+)"\\s*>([\\s\\S]*?)<\\/${SEP}\\s*DSML${SEP}\\s*invoke\\s*>`,
+    'g'
+  );
+
+  // 匹配每个 <｜DSML｜parameter name="..." ...>VALUE</｜DSML｜parameter>
+  const paramRegex = new RegExp(
+    `<${SEP}\\s*DSML${SEP}\\s*parameter\\s+name="([^"]+)"[^>]*>([\\s\\S]*?)<\\/${SEP}\\s*DSML${SEP}\\s*parameter\\s*>`,
+    'g'
+  );
+
+  const toolCalls = [];
+  const rawToolCalls = [];
+  let callIndex = 0;
+
+  // 提取所有 function_calls 块
+  const blocks = text.match(blockRegex);
+  if (!blocks || blocks.length === 0) {
+    return { toolCalls: [], rawToolCalls: [], cleanText: text };
+  }
+
+  for (const block of blocks) {
+    let invokeMatch;
+    invokeRegex.lastIndex = 0;
+
+    while ((invokeMatch = invokeRegex.exec(block)) !== null) {
+      const funcName = invokeMatch[1].trim();
+      const invokeBody = invokeMatch[2];
+
+      // 解析参数
+      const args = {};
+      let paramMatch;
+      paramRegex.lastIndex = 0;
+
+      while ((paramMatch = paramRegex.exec(invokeBody)) !== null) {
+        const paramName = paramMatch[1].trim();
+        let paramValue = paramMatch[2].trim();
+
+        // 尝试 JSON 解析参数值
+        try {
+          paramValue = JSON.parse(paramValue);
+        } catch {
+          // 保持字符串原值
+        }
+        args[paramName] = paramValue;
+      }
+
+      const callId = `dsml_call_${Date.now()}_${callIndex++}`;
+      const argsStr = JSON.stringify(args);
+
+      toolCalls.push({ id: callId, name: funcName, args });
+      rawToolCalls.push({
+        id: callId,
+        type: 'function',
+        function: { name: funcName, arguments: argsStr }
+      });
+    }
+  }
+
+  // 从原文中移除 DSML 块，保留其余文本内容
+  let cleanText = text.replace(blockRegex, '').replace(/\n{3,}/g, '\n\n').trim();
+
+  return { toolCalls, rawToolCalls, cleanText };
+}
+
+/**
+ * 过滤 LLM 输出中可能泄露的 function call / tool_call JSON 片段
+ * 某些模型（尤其 DeepSeek）在非 tool_call 回合也会输出类似工具调用的 JSON
+ */
+function sanitizeLLMOutput(text) {
+  if (!text) return text;
+
+  const TOOL_NAMES = ['web_search', 'search_poi', 'search_flights', 'search_hotels',
+    'update_trip_info', 'delegate_to_agents', 'get_weather', 'get_exchange_rate',
+    'cache_destination_knowledge'];
+  const toolNamePattern = TOOL_NAMES.join('|');
+
+  let cleaned = text;
+
+  // 1. 移除 <think>...</think> 块（DeepSeek reasoner 思考过程）
+  cleaned = cleaned.replace(/<think>[\s\S]*?(<\/think>|$)/g, '');
+
+  // 2. 移除 DSML 标签（DeepSeek 特有格式）— 支持全角 ｜ 和半角 | 两种变体
+  cleaned = cleaned.replace(/<[｜|]?\s*DSML[\s\S]*?DSML\s*[｜|]?>/g, '');
+  // 移除残留的 DSML 起止标签（匹配不完整时的兜底）
+  cleaned = cleaned.replace(/<\/?[｜|]?\s*DSML[｜|]?\s*(?:function_calls|invoke|parameter)[^>]*>/g, '');
+
+  // 3. 移除工具调用 JSON（含嵌套大括号）：匹配 {"name":"tool_name" 开头直到平衡的 }
+  const toolCallRegex = new RegExp(`\\{[\\s]*"(?:name|function)"[\\s]*:[\\s]*"(?:${toolNamePattern})"[\\s\\S]*?(?:\\}\\s*){1,3}`, 'g');
+  cleaned = cleaned.replace(toolCallRegex, '');
+
+  // 4. 移除 tool_calls 数组：[{"id":"call_...", "type":"function", ...}]
+  cleaned = cleaned.replace(/\[\s*\{[\s]*"id"\s*:\s*"call_[\s\S]*?\}\s*\]/g, '');
+
+  // 5. 移除形如 {"id":"call_xxx",...} 单个工具调用对象
+  cleaned = cleaned.replace(/\{\s*"id"\s*:\s*"call_[^"]*"[\s\S]*?\}\s*(?:\]\s*)?/g, '');
+
+  // 6. 移除 <function_calls>/<invoke>/<parameter> XML 标签（部分模型会输出）
+  cleaned = cleaned.replace(/<\/?function_calls?>/g, '');
+  cleaned = cleaned.replace(/<\/?invoke[^>]*>/g, '');
+  cleaned = cleaned.replace(/<parameter[^>]*>[\s\S]*?<\/parameter>/g, '');
+  cleaned = cleaned.replace(/<\/?parameter[^>]*>/g, '');
+
+  // 7. 清理多余的连续空行
+  cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
+  return cleaned.trim() || text;  // fallback 到原文防止全部被清除
+}
+
+/**
+ * Stream an OpenAI-format completion, forwarding tokens via SSE.
+ */
+async function streamOpenAI(client, model, messages, tools, sendSSE, silent = false) {
+  const hasTools = Array.isArray(tools) && tools.length > 0;
+  const createParams = {
+    model,
+    messages,
+    temperature: 0.7,
+    max_tokens: 8192,
+    stream: true,
+  };
+  if (hasTools) {
+    createParams.tools = tools;
+    createParams.tool_choice = 'auto';
+  }
+
+  const stream = await withTimeout(
+    client.chat.completions.create(createParams),
+    LLM_TIMEOUT_MS,
+    'OpenAI stream 创建'
+  );
+
+  let fullText = '';
+  const toolCallsMap = {};
+
+  const streamPromise = (async () => {
     for await (const chunk of stream) {
       const choice = chunk.choices[0];
       if (!choice) continue;
       const delta = choice.delta;
 
-      // 实时转发文本 token
       if (delta.content) {
         fullText += delta.content;
-        sendSSE('token', { text: delta.content });
+        if (!silent) sendSSE('token', { text: delta.content });
       }
 
-      // 累积工具调用（流式中分片到达）
       if (delta.tool_calls) {
         for (const tc of delta.tool_calls) {
           if (!toolCallsMap[tc.index]) {
@@ -723,127 +562,220 @@ async function handleOpenAIChat(apiKey, model, systemPrompt, userMessages, sendS
         }
       }
     }
+  })();
 
-    const toolCalls = Object.values(toolCallsMap);
-    llmTimer.done({ textLen: fullText.length, toolCallCount: toolCalls.length });
+  await withTimeout(streamPromise, LLM_TIMEOUT_MS, 'OpenAI stream 读取');
 
-    if (toolCalls.length > 0) {
-      // 追加含工具调用的 assistant 消息
-      messages.push({
-        role: 'assistant',
-        content: fullText || null,
-        tool_calls: toolCalls.map(tc => ({
-          id: tc.id,
-          type: 'function',
-          function: { name: tc.function.name, arguments: tc.function.arguments }
-        }))
-      });
+  let rawToolCalls = Object.values(toolCallsMap);
+  let toolCalls = rawToolCalls.map(tc => {
+    let args;
+    try { args = JSON.parse(tc.function.arguments); } catch { args = {}; }
+    return { id: tc.id, name: tc.function.name, args };
+  });
 
-      for (const toolCall of toolCalls) {
-        const funcName = toolCall.function.name;
-        const toolId = toolCall.id;
-        let funcArgs;
-        try {
-          funcArgs = JSON.parse(toolCall.function.arguments);
-        } catch {
-          funcArgs = {};
-        }
-
-        // 防止主 Agent 反复委派（每次请求最多委派 2 次）
-        if (funcName === 'delegate_to_agents') {
-          delegationCount++;
-          if (delegationCount > 2) {
-            chatLog.warn('检测到重复委派，跳过', { delegationCount });
-            messages.push({ role: 'tool', tool_call_id: toolCall.id, content: '已达到本轮委派上限，请直接基于已有信息回复用户。' });
-            continue;
-          }
-        }
-
-        const delegateCtx = { provider: provider || 'openai', apiKey, model: selectedModel, baseUrl };
-        const resultStr = await runTool(funcName, funcArgs, toolId, sendSSE, tripBook, delegateCtx, reqLog);
-        messages.push({ role: 'tool', tool_call_id: toolCall.id, content: resultStr });
-      }
-
-      continue; // 继续下一轮
+  // ── DSML 兜底：DeepSeek 模型可能将 tool call 以 DSML 标签输出到 content 中 ──
+  // 当 OpenAI SDK 未解析到任何 tool_calls 但文本中包含 DSML 时，手动解析并转换
+  if (toolCalls.length === 0 && containsDSML(fullText)) {
+    const dsmlResult = parseDSMLToolCalls(fullText);
+    if (dsmlResult.toolCalls.length > 0) {
+      toolCalls = dsmlResult.toolCalls;
+      rawToolCalls = dsmlResult.rawToolCalls;
+      fullText = dsmlResult.cleanText; // 剥离已解析的 DSML 块，避免泄漏到前端
     }
-
-    return fullText; // 返回完整回复文本供 quick_replies 检测
   }
 
-  // 达到最大工具轮次仍在循环 → 返回空字符串，避免 undefined
-  return '';
+  const rawAssistant = {
+    role: 'assistant',
+    content: fullText || null,
+    ...(rawToolCalls.length > 0 ? {
+      tool_calls: rawToolCalls.map(tc => ({
+        id: tc.id,
+        type: 'function',
+        function: { name: tc.function.name, arguments: tc.function.arguments }
+      }))
+    } : {})
+  };
+
+  return { fullText, toolCalls, rawAssistant };
 }
 
-// ============================================================
-// Anthropic Agent 循环
-// ============================================================
-async function handleAnthropicChat(apiKey, model, systemPrompt, userMessages, sendSSE, baseUrl, tripBook, provider, reqLog) {
-  const chatLog = (reqLog || log).child({ provider: provider || 'anthropic' });
+async function handleChat(apiKey, model, systemPrompt, userMessages, sendSSE, baseUrl, tripBook, reqLog) {
+  const chatLog = (reqLog || log);
+
   const clientOpts = { apiKey };
   if (baseUrl) clientOpts.baseURL = baseUrl;
-  const client = new Anthropic(clientOpts);
-  const tools = getToolDefinitionsForAnthropic();
-  const selectedModel = model || 'claude-sonnet-4-20250514';
+  const client = new OpenAI(clientOpts);
+  const tools = getMainAgentToolDefinitions();
+  const selectedModel = model || DEFAULT_MODELS.openai;
 
-  const messages = [...userMessages];
+  const messages = [{ role: 'system', content: systemPrompt }, ...userMessages];
 
   const MAX_TOOL_ROUNDS = 10;
-  let delegationCount = 0; // 防止主 Agent 反复委派
+  let delegationCount = 0;
+  const delegatedAgents = new Set(); // 记录已成功委派过的 agent 类型，防止重复委派
+  let pendingCoverMsg = null; // coveredTopics 消息暂存，等 tool 消息全部 push 后再注入
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    if (round > 0) {
+      sendSSE('round_start', { round: round + 1 });
+    }
+    sendSSE('thinking', {});
     chatLog.info(`主Agent轮次 ${round + 1}/${MAX_TOOL_ROUNDS}`, { msgCount: messages.length });
     const llmTimer = chatLog.startTimer('llm_call');
-    // 真流式调用
-    const stream = client.messages.stream({
-      model: selectedModel,
-      system: systemPrompt,
-      messages,
-      tools,
-      max_tokens: 4096,
-      temperature: 0.7,
-    });
 
-    // 实时转发文本 token
-    stream.on('text', (text) => {
-      sendSSE('token', { text });
-    });
+    const { fullText, toolCalls, rawAssistant } = await streamOpenAI(client, selectedModel, messages, tools, sendSSE, true);
 
-    // 等待完整响应（含工具调用信息）
-    const response = await stream.finalMessage();
-    const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
-    llmTimer.done({ toolCallCount: toolUseBlocks.length });
+    llmTimer.done({ textLen: fullText.length, toolCallCount: toolCalls.length });
 
-    if (toolUseBlocks.length > 0) {
-      messages.push({ role: 'assistant', content: response.content });
+    if (toolCalls.length === 0) {
+      sendSSE('thinking_done', {});
+      // 过滤可能泄露的 function call JSON 片段
+      const safeText = sanitizeLLMOutput(fullText);
+      sendSSE('token', { text: safeText });
+      return safeText;
+    }
 
-      const toolResults = [];
-      for (const toolUse of toolUseBlocks) {
-        // 防止主 Agent 反复委派（每次请求最多委派 2 次）
-        if (toolUse.name === 'delegate_to_agents') {
-          delegationCount++;
-          if (delegationCount > 2) {
-            chatLog.warn('检测到重复委派，跳过', { delegationCount });
-            toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: '已达到本轮委派上限，请直接基于已有信息回复用户。' });
+    // 有工具调用时也发 thinking_done，让前端清除思考指示器
+    sendSSE('thinking_done', {});
+
+    messages.push(rawAssistant);
+
+    // ⚠️ 轮次检查：在执行工具前进行（防止在 maxRounds 触发时仍然执行工具）
+    if (round + 1 >= MAX_TOOL_ROUNDS && toolCalls.length > 0) {
+      chatLog.warn('轮次已满，拒绝工具调用', {
+        currentRound: round + 1,
+        maxRounds: MAX_TOOL_ROUNDS,
+        toolCount: toolCalls.length
+      });
+      // 给每个 tool_call 填充拒绝响应（保证 assistant.tool_calls → tool 消息顺序完整）
+      for (const tc of toolCalls) {
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: '⚠️ 已达工具调用轮次上限，本次工具调用被跳过。请直接基于已有信息生成最终总结回复用户。'
+        });
+      }
+      // 跳出循环，进入下方"最终总结"LLM 调用
+      break;
+    }
+
+    const toolResults = [];
+    for (const tc of toolCalls) {
+      if (tc.name === 'delegate_to_agents') {
+        delegationCount++;
+        if (delegationCount > 2) {
+          chatLog.warn('检测到重复委派，跳过', { delegationCount });
+          toolResults.push({ id: tc.id, content: '已达到本轮委派上限，请直接基于已有信息回复用户。' });
+          continue;
+        }
+
+        // 过滤掉已成功委派过的 agent 类型（防止同类型重复委派）
+        if (tc.args && Array.isArray(tc.args.tasks)) {
+          const originalCount = tc.args.tasks.length;
+          tc.args.tasks = tc.args.tasks.filter(t => {
+            if (delegatedAgents.has(t.agent)) {
+              chatLog.warn('拦截重复委派的子Agent', { agent: t.agent, task: t.task?.slice(0, 80) });
+              return false;
+            }
+            return true;
+          });
+          if (tc.args.tasks.length === 0) {
+            chatLog.warn('所有子Agent均已执行过，跳过委派', { filtered: originalCount });
+            toolResults.push({ id: tc.id, content: `所有指定的子Agent（${Array.from(delegatedAgents).join(', ')}）在本次对话中已执行过，结果已在上方。请直接基于已有信息回复用户，不要重复委派。` });
             continue;
           }
         }
-
-        const delegateCtx = { provider: provider || 'anthropic', apiKey, model: selectedModel, baseUrl };
-        const resultStr = await runTool(toolUse.name, toolUse.input, toolUse.id, sendSSE, tripBook, delegateCtx, reqLog);
-        toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: resultStr });
       }
 
-      messages.push({ role: 'user', content: toolResults });
-      continue;
+      const delegateCtx = { provider: 'openai', apiKey, model: selectedModel, baseUrl };
+      const resultStr = await runTool(tc.name, tc.args, tc.id, sendSSE, tripBook, delegateCtx, reqLog);
+      toolResults.push({ id: tc.id, content: resultStr });
+
+      // 对 delegate_to_agents 的结果，记录已委派 agent + 收集 coveredTopics（稍后注入）
+      if (tc.name === 'delegate_to_agents') {
+        try {
+          const delegResult = JSON.parse(resultStr);
+          // 记录已成功委派的 agent 类型
+          if (delegResult.results && Array.isArray(delegResult.results)) {
+            for (const r of delegResult.results) {
+              if (r.status === 'success' && r.agent) {
+                delegatedAgents.add(r.agent);
+              }
+            }
+            chatLog.debug('已记录委派过的Agent', { delegatedAgents: Array.from(delegatedAgents) });
+          }
+          // 收集 coveredTopics（不在这里 push 到 messages，避免打断 tool_calls → tool 消息顺序）
+          if (delegResult.coveredTopics && delegResult.coveredTopics.length > 0) {
+            pendingCoverMsg = `⚠️ **已覆盖主题（严禁重复查询）**：
+${delegResult.coveredTopics.map(t => `• ${t}`).join('\n')}
+
+${delegResult._instruction || ''}`.trim();
+            chatLog.debug('已收集 coveredTopics（待注入）', {
+              topics: delegResult.coveredTopics,
+              topicCount: delegResult.coveredTopics.length
+            });
+          }
+        } catch (e) {
+          chatLog.debug('coveredTopics 提取失败', { error: e.message });
+        }
+      }
     }
 
-    // 无工具调用 → 返回完整回复文本
-    const textBlocks = response.content.filter(b => b.type === 'text');
-    const fullText = textBlocks.map(b => b.text).join('');
+    // ── 自动推进 phase ──
+    try {
+      const currentPhase = (tripBook.itinerary && tripBook.itinerary.phase) || 0;
+      const toolNames = toolCalls.map(tc => tc.name);
+      let inferredPhase = currentPhase;
 
-    return fullText; // 返回完整回复文本供 quick_replies 检测
+      if (currentPhase < 2 && toolNames.some(n => ['delegate_to_agents', 'search_flights'].includes(n))) {
+        inferredPhase = 2;
+      } else if (currentPhase < 3 && toolNames.some(n => ['search_hotels', 'search_poi'].includes(n))) {
+        inferredPhase = 3;
+      }
+
+      if (inferredPhase > currentPhase) {
+        chatLog.info('自动推进 phase', { from: currentPhase, to: inferredPhase, trigger: toolNames.join(',') });
+        tripBook.updatePhase(inferredPhase);
+        sendSSE('tripbook_update', {
+          ...tripBook.toPanelData(),
+          _snapshot: tripBook.toJSON()
+        });
+      }
+    } catch (err) {
+      chatLog.warn('自动推进 phase 失败', { error: err.message });
+    }
+
+    // 先 push 所有 tool 消息（保证 assistant.tool_calls → tool 消息顺序完整）
+    for (const r of toolResults) {
+      messages.push({ role: 'tool', tool_call_id: r.id, content: r.content });
+    }
+
+    // 再注入 coveredTopics 的 user 消息（在 tool 消息之后，不会打断 OpenAI 要求的消息顺序）
+    if (pendingCoverMsg) {
+      messages.push({ role: 'user', content: pendingCoverMsg });
+      pendingCoverMsg = null;
+    }
   }
-  return '';
+
+  // MAX_TOOL_ROUNDS 耗尽 — 最后一轮不带 tools，让 LLM 生成最终总结
+  chatLog.warn('工具调用轮次已达上限，执行最终总结', { maxRounds: MAX_TOOL_ROUNDS, delegationCount });
+  sendSSE('thinking_done', {});
+
+  // 追加一条系统级提示，引导 LLM 输出最终总结而非继续调用工具
+  messages.push({
+    role: 'user',
+    content: '请直接基于上方已获取的所有信息，为我生成完整的回复。不需要再搜索任何内容。'
+  });
+
+  try {
+    // 不传 tools → LLM 无法调用工具，必须直接输出文本；silent=false 直接流式输出
+    const { fullText: finalText } = await streamOpenAI(client, selectedModel, messages, [], sendSSE, false);
+    return finalText;
+  } catch (err) {
+    chatLog.error('最终总结调用失败', { error: err.message });
+    // 不向用户暴露技术性错误
+    return '';
+  }
 }
 
 // ============================================================
@@ -852,20 +784,17 @@ async function handleAnthropicChat(apiKey, model, systemPrompt, userMessages, se
 if (process.env.SENTRY_DSN) {
   app.use(Sentry.Handlers.errorHandler({
     shouldHandleError(error) {
-      // Only handle HTTP 5xx errors and other critical issues
       if (error.status === 404) return false;
       return error.status >= 500 || !error.status;
     }
   }));
 }
 
-// Global error handler (must be last)
 app.use(globalErrorHandler());
 
 // ============================================================
 // 启动服务器
 // ============================================================
-initDestCache();
 
 app.listen(PORT, () => {
   log.info('AI Travel Planner 已启动', { port: PORT, env: process.env.NODE_ENV || 'development' });
@@ -873,7 +802,6 @@ app.listen(PORT, () => {
     log.info('Sentry monitoring enabled');
   }
 
-  // 每 30 秒检查内存使用情况，超过阈值时发出警告
   const MEM_WARN_MB = 512;
   setInterval(() => {
     const mem = process.memoryUsage();
@@ -881,11 +809,10 @@ app.listen(PORT, () => {
     const heapMB = Math.round(mem.heapUsed / 1024 / 1024);
     if (rssMB > MEM_WARN_MB) {
       log.warn('内存警告', { rssMB, heapMB, threshold: MEM_WARN_MB });
-      // 触发 GC（如果暴露了 --expose-gc）
       if (global.gc) {
         log.info('触发手动 GC');
         global.gc();
       }
     }
-  }, 30000).unref(); // unref() 确保不阻止进程退出
+  }, 30000).unref();
 });

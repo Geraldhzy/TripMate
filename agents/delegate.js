@@ -8,7 +8,7 @@ const log = require('../utils/logger');
 
 const TOOL_DEF = {
   name: 'delegate_to_agents',
-  description: '将任务委派给专业子Agent并行执行。可同时委派多个不同领域的任务，子Agent会并行工作以提高效率。每个子Agent专精一个领域，拥有该领域的专用工具。',
+  description: '将任务并行委派给专业Agent。支持同时委派机票搜索和目的地调研，两个Agent并行执行互不等待。flight Agent 会自行调研航线生态再搜索机票；research Agent 并行搜索签证、交通、天气、美食等信息。',
   parameters: {
     type: 'object',
     properties: {
@@ -20,16 +20,16 @@ const TOOL_DEF = {
             agent: {
               type: 'string',
               enum: Object.keys(AGENT_CONFIGS),
-              description: '目标Agent类型：transport(交通/机票)、food(餐饮)、hotel(住宿)、attractions(景点)、knowledge(签证/天气/目的地百科)'
+              description: '目标Agent类型：flight(机票搜索，自带航线调研) | research(目的地调研，签证/交通/天气/美食等)'
             },
             task: {
               type: 'string',
-              description: '具体任务描述，必须包含所有必要上下文（目的地、日期、人数、偏好等），子Agent无法看到主对话历史'
+              description: 'flight: 出发城市及周边机场、目的地、日期及弹性范围、人数。research: 目的地、出行时间、需要调研的主题列表。'
             }
           },
           required: ['agent', 'task']
         },
-        description: '要委派的任务列表，不同Agent可并行执行'
+        description: '要委派的任务列表，多个任务会并行执行'
       }
     },
     required: ['tasks']
@@ -44,9 +44,9 @@ const TOOL_DEF = {
  * @param {string} model
  * @param {Function} sendSSE
  * @param {string} baseUrl
- * @param {number} timeoutMs - 单个子 Agent 超时时间（默认 60 秒）
+ * @param {number} timeoutMs - 单个子 Agent 超时时间（默认 120 秒）
  */
-async function executeDelegation(tasks, provider, apiKey, model, sendSSE, baseUrl, timeoutMs = 60000, reqLog) {
+async function executeDelegation(tasks, provider, apiKey, model, sendSSE, baseUrl, timeoutMs = 120000, reqLog) {
   const delLog = (reqLog || log).child({ tool: 'delegate' });
 
   if (!Array.isArray(tasks) || tasks.length === 0) {
@@ -73,7 +73,8 @@ async function executeDelegation(tasks, provider, apiKey, model, sendSSE, baseUr
     agents: validTasks.map(t => ({
       agent: t.agent,
       label: AGENT_CONFIGS[t.agent].label,
-      icon: AGENT_CONFIGS[t.agent].icon
+      icon: AGENT_CONFIGS[t.agent].icon,
+      task: t.task.slice(0, 200)
     }))
   });
 
@@ -113,26 +114,46 @@ async function executeDelegation(tasks, provider, apiKey, model, sendSSE, baseUr
     };
   });
 
+  const successCount = formattedResults.filter(r => r.status === 'success').length;
+  const failedCount = formattedResults.length - successCount;
+
   sendSSE('agents_batch_done', {
     count: formattedResults.length,
-    success: formattedResults.filter(r => r.status === 'success').length,
-    failed: formattedResults.filter(r => r.status !== 'success').length
+    success: successCount,
+    failed: failedCount
   });
 
-  const successCount = formattedResults.filter(r => r.status === 'success').length;
-  const failedCount = formattedResults.filter(r => r.status !== 'success').length;
   batchTimer.done({ total: formattedResults.length, success: successCount, failed: failedCount });
 
   // 截断过长的子 Agent 结果，避免撑爆主 Agent 上下文
-  const MAX_RESULT_CHARS = 4000;
+  // research agent 输出较长（多主题调研），给予更大的阈值
+  const MAX_RESULT_CHARS = { research: 12000 };
+  const DEFAULT_MAX_CHARS = 8000;
   for (const r of formattedResults) {
-    if (r.data && r.data.length > MAX_RESULT_CHARS) {
-      delLog.debug('子Agent结果截断', { agent: r.agent, originalLen: r.data.length, maxLen: MAX_RESULT_CHARS });
-      r.data = r.data.slice(0, MAX_RESULT_CHARS) + '\n\n…（结果过长，已截断。关键信息已包含在上方内容中）';
+    const limit = MAX_RESULT_CHARS[r.agent] || DEFAULT_MAX_CHARS;
+    if (r.data && r.data.length > limit) {
+      delLog.debug('子Agent结果截断', { agent: r.agent, originalLen: r.data.length, maxLen: limit });
+      r.data = r.data.slice(0, limit) + '\n\n…（结果过长，已截断。关键信息已包含在上方内容中）';
     }
   }
 
-  return JSON.stringify({ results: formattedResults });
+  // 注入 coveredTopics：明确告知主Agent哪些主题已被子Agent覆盖，禁止重复搜索
+  const AGENT_COVERED_TOPICS = {
+    flight: ['航班搜索', '航线调研', '机票报价', '航空公司对比'],
+    research: ['签证政策', '城际交通', '天气气候', '特色活动', '美食推荐']
+  };
+  const coveredTopics = [];
+  for (const r of formattedResults) {
+    if (r.status === 'success' && AGENT_COVERED_TOPICS[r.agent]) {
+      coveredTopics.push(...AGENT_COVERED_TOPICS[r.agent]);
+    }
+  }
+
+  return JSON.stringify({
+    results: formattedResults,
+    coveredTopics,
+    _instruction: '以上主题已由子Agent完成调研，主Agent禁止再用 web_search 重复搜索这些主题。直接采纳子Agent结果即可。'
+  });
 }
 
 module.exports = { TOOL_DEF, executeDelegation };

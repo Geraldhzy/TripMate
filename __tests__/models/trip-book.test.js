@@ -26,33 +26,18 @@ describe('TripBook', () => {
     });
   });
 
-  describe('Layer 2: DynamicData - Weather', () => {
-    test('setWeather should store weather for city', () => {
-      tripBook.setWeather('Tokyo', {
-        city: 'Tokyo',
-        current: { temp_c: 20, description: 'Sunny' }
-      });
-      expect(tripBook.dynamic.weather.tokyo).toBeDefined();
-      expect(tripBook.dynamic.weather.tokyo.current.temp_c).toBe(20);
+  describe('Layer 2: DynamicData - Web Searches', () => {
+    test('addWebSearch should store search queries', () => {
+      tripBook.addWebSearch({ query: 'Tokyo weather', summary: 'Sunny, 20°C' });
+      expect(tripBook.dynamic.webSearches).toHaveLength(1);
+      expect(tripBook.dynamic.webSearches[0].query).toBe('Tokyo weather');
     });
 
-    test('setWeather should support multiple cities', () => {
-      tripBook.setWeather('Tokyo', { city: 'Tokyo', current: { temp_c: 20 } });
-      tripBook.setWeather('Kyoto', { city: 'Kyoto', current: { temp_c: 18 } });
-      expect(Object.keys(tripBook.dynamic.weather).length).toBeGreaterThanOrEqual(2);
-    });
-  });
-
-  describe('Layer 2: DynamicData - Exchange Rate', () => {
-    test('setExchangeRate should store exchange rates', () => {
-      tripBook.setExchangeRate('JPY/USD', 0.0067);
-      expect(tripBook.dynamic.exchangeRates['JPY/USD']).toBe(0.0067);
-    });
-
-    test('setExchangeRate should handle multiple pairs', () => {
-      tripBook.setExchangeRate('JPY/USD', 0.0067);
-      tripBook.setExchangeRate('EUR/USD', 1.08);
-      expect(Object.keys(tripBook.dynamic.exchangeRates).length).toBeGreaterThanOrEqual(2);
+    test('addWebSearch should deduplicate by query', () => {
+      tripBook.addWebSearch({ query: 'Tokyo weather', summary: 'Sunny' });
+      tripBook.addWebSearch({ query: 'Tokyo weather', summary: 'Rainy' });
+      expect(tripBook.dynamic.webSearches).toHaveLength(1);
+      expect(tripBook.dynamic.webSearches[0].summary).toBe('Rainy');
     });
   });
 
@@ -177,12 +162,83 @@ describe('TripBook', () => {
 
     test('updateItinerary should preserve existing segments', () => {
       tripBook.updateItinerary({
-        days: [{ day: 1, segments: ['activity 1'] }]
+        days: [{ day: 1, segments: [{ time: '09:00', title: 'activity 1', type: 'attraction' }] }]
       });
       tripBook.updateItinerary({
         days: [{ day: 1, notes: 'updated' }]
       });
-      expect(tripBook.itinerary.days[0].segments).toEqual(['activity 1']);
+      expect(tripBook.itinerary.days[0].segments).toHaveLength(1);
+      expect(tripBook.itinerary.days[0].segments[0].title).toBe('activity 1');
+      expect(tripBook.itinerary.days[0].notes).toBe('updated');
+    });
+
+    test('updateItinerary should merge new segments with existing ones', () => {
+      tripBook.updateItinerary({
+        days: [{ day: 1, city: 'Tokyo', segments: [
+          { time: '09:00', title: '浅草寺', type: 'attraction' },
+          { time: '12:00', title: '午餐', type: 'meal' }
+        ] }]
+      });
+      // 添加新的 segment，不应丢失原有的
+      tripBook.updateItinerary({
+        days: [{ day: 1, segments: [
+          { time: '15:00', title: '东京塔', type: 'attraction' }
+        ] }]
+      });
+      expect(tripBook.itinerary.days[0].segments).toHaveLength(3);
+      expect(tripBook.itinerary.days[0].segments.map(s => s.title))
+        .toEqual(['浅草寺', '午餐', '东京塔']);
+    });
+
+    test('updateItinerary should update existing segment by time+title match', () => {
+      tripBook.updateItinerary({
+        days: [{ day: 1, segments: [
+          { time: '09:00', title: '浅草寺', type: 'attraction', notes: '' }
+        ] }]
+      });
+      // 更新同一个 segment 的 notes
+      tripBook.updateItinerary({
+        days: [{ day: 1, segments: [
+          { time: '09:00', title: '浅草寺', notes: '门票免费' }
+        ] }]
+      });
+      expect(tripBook.itinerary.days[0].segments).toHaveLength(1);
+      expect(tripBook.itinerary.days[0].segments[0].notes).toBe('门票免费');
+      expect(tripBook.itinerary.days[0].segments[0].type).toBe('attraction');
+    });
+
+    test('updateItinerary with _replace should fully replace segments', () => {
+      tripBook.updateItinerary({
+        days: [{ day: 1, segments: [
+          { time: '09:00', title: '旧活动A' },
+          { time: '12:00', title: '旧活动B' }
+        ] }]
+      });
+      tripBook.updateItinerary({
+        days: [{ day: 1, _replace: true, segments: [
+          { time: '10:00', title: '新活动C' }
+        ] }]
+      });
+      expect(tripBook.itinerary.days[0].segments).toHaveLength(1);
+      expect(tripBook.itinerary.days[0].segments[0].title).toBe('新活动C');
+    });
+
+    test('updateItinerary should not affect unmentioned days', () => {
+      tripBook.updateItinerary({
+        days: [
+          { day: 1, city: 'Tokyo', segments: [{ time: '09:00', title: 'A' }] },
+          { day: 2, city: 'Tokyo', segments: [{ time: '09:00', title: 'B' }] },
+          { day: 3, city: 'Kyoto', segments: [{ time: '09:00', title: 'C' }] }
+        ]
+      });
+      // 只更新 day 2
+      tripBook.updateItinerary({
+        days: [{ day: 2, segments: [{ time: '14:00', title: 'D' }] }]
+      });
+      expect(tripBook.itinerary.days).toHaveLength(3);
+      expect(tripBook.itinerary.days[0].segments[0].title).toBe('A'); // day 1 untouched
+      expect(tripBook.itinerary.days[1].segments).toHaveLength(2);    // day 2 merged
+      expect(tripBook.itinerary.days[2].segments[0].title).toBe('C'); // day 3 untouched
     });
   });
 
@@ -202,8 +258,8 @@ describe('TripBook', () => {
       expect(tripBook.itinerary.phase).toBe(originalPhase);
     });
 
-    test('should handle all valid phases 0-7', () => {
-      for (let phase = 0; phase <= 7; phase++) {
+    test('should handle all valid phases 0-4', () => {
+      for (let phase = 0; phase <= 4; phase++) {
         tripBook.updatePhase(phase);
         expect(tripBook.itinerary.phase).toBe(phase);
       }

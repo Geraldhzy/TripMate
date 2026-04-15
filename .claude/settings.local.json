@@ -67,7 +67,25 @@
       "Bash(ulimit -v)",
       "Bash(sysctl -n hw.memsize)",
       "Bash(log show:*)",
-      "Bash(grep -E \"\\\\.js$|trip-book\")"
+      "Bash(grep -E \"\\\\.js$|trip-book\")",
+      "Bash(sed -n '150,156p' /Users/geraldhuang/DEV/ai-travel-planner/models/trip-book.js)",
+      "Bash(sed -n '92,100p' /Users/geraldhuang/DEV/ai-travel-planner/tools/update-trip-info.js)",
+      "Bash(sed -n '151,158p' /Users/geraldhuang/DEV/ai-travel-planner/public/js/chat.js)",
+      "Bash(xargs rm:*)",
+      "Bash(grep -E \"\\\\.\\(js\\)$\")",
+      "Bash(grep -l \"search_hotels\\\\|search_poi\\\\|web_search\\\\|get_weather\" prompts/system-prompt.js agents/prompts/*.js)",
+      "Bash(find:*)",
+      "Read(//Users/geraldhuang/DEV/ai-travel-planner/**)",
+      "Bash(du -sh /Users/geraldhuang/DEV/ai-travel-planner/SYSTEM_PROMPT*)",
+      "Bash(npx jest:*)",
+      "Bash(grep -E \"\\\\.\\(js|html|json\\)$\")",
+      "Bash(stat /Users/geraldhuang/DEV/ai-travel-planner/logs/*.log)",
+      "Bash(grep:*)",
+      "Bash(sed -i '' \"297s/移除 thinking indicator，隐藏/隐藏/\" public/js/chat.js)",
+      "Bash(sed -i '' \"297s/（等 token 到来时会被替换）/\\(等 token 到来时会显示\\)/\" public/js/chat.js)",
+      "Bash(sed -n '584p' /Users/geraldhuang/DEV/ai-travel-planner/server.js)",
+      "Bash(sed -n '640,645p' /Users/geraldhuang/DEV/ai-travel-planner/server.js)",
+      "Bash(sed -n '668,675p' /Users/geraldhuang/DEV/ai-travel-planner/server.js)"
     ]
   }
 }

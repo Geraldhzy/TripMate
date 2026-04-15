@@ -238,7 +238,23 @@ function handleSSEEvent(type, data, bubble, toolContainer, getFullText) {
       scrollToBottom();
       break;
 
+    case 'thinking':
+      // 确保 bubble 显示思考状态（typing-dots）
+      if (!bubble.querySelector('.typing-dots') && !getFullText()) {
+        bubble.innerHTML = '<div class="typing-dots"><span></span><span></span><span></span></div>';
+      }
+      break;
+
+    case 'thinking_done':
+      // 不清空 bubble — 如果还没有 token 内容，保持 typing-dots
+      break;
+
     case 'tool_start': {
+      // delegate_to_agents 不在这里展示单独的 tool_status，由 agents_batch_start 接管
+      if (data.name === 'delegate_to_agents') {
+        scrollToBottom();
+        break;
+      }
       // search_flights / search_hotels 聚合显示：多条航线合并为一行
       if (GROUPED_TOOLS.includes(data.name)) {
         const groupKey = `group_${data.name}`;
@@ -273,6 +289,17 @@ function handleSSEEvent(type, data, bubble, toolContainer, getFullText) {
 
     case 'tool_result': {
       const key = data.id || data.name;
+      // delegate_to_agents 的 tool_result 更新批次容器的最终状态
+      if (data.name === 'delegate_to_agents') {
+        const batchEl = toolContainer.querySelector('.agent-batch');
+        if (batchEl && batchEl.classList.contains('running')) {
+          batchEl.className = 'tool-status agent-batch done';
+          const label = data.resultLabel || '委派完成';
+          batchEl.innerHTML = `<span>✅ ${label}</span>`;
+        }
+        scrollToBottom();
+        break;
+      }
       // 检查是否属于聚合组
       const groupName = toolContainer.dataset[key];
       if (groupName) {
@@ -298,6 +325,103 @@ function handleSSEEvent(type, data, bubble, toolContainer, getFullText) {
         const displayLabel = data.resultLabel ? `${fallbackLabel} — ${data.resultLabel}` : fallbackLabel;
         runningEl.innerHTML = `<span>✅ ${displayLabel}</span>`;
       }
+      break;
+    }
+
+    // ── 子 Agent 批次事件 ──
+
+    case 'agents_batch_start': {
+      // 创建批次容器，显示所有子 Agent 的标签
+      const batchEl = document.createElement('div');
+      batchEl.className = 'tool-status agent-batch running';
+      const agentLabels = (data.agents || []).map(a => `${a.icon || '🔧'} ${a.label}`).join(' + ');
+      batchEl.innerHTML = `<div class="spinner"></div><span>正在并行执行：${agentLabels}</span>`;
+      toolContainer.appendChild(batchEl);
+      // 确保 bubble 保持 typing-dots（委派期间主 Agent 处于思考等待状态）
+      if (!getFullText()) {
+        bubble.innerHTML = '<div class="typing-dots"><span></span><span></span><span></span></div>';
+      }
+      scrollToBottom();
+      break;
+    }
+
+    case 'agent_start': {
+      // 为单个子 Agent 创建进度行
+      const agentEl = document.createElement('div');
+      agentEl.className = 'tool-status agent-progress running';
+      agentEl.dataset.agent = data.agent;
+      const icon = data.icon || '🔧';
+      const label = data.label || data.agent;
+      agentEl.innerHTML = `<div class="spinner"></div><span>${icon} ${label}：执行中…</span>`;
+      toolContainer.appendChild(agentEl);
+      scrollToBottom();
+      break;
+    }
+
+    case 'agent_tool': {
+      // 子 Agent 的工具调用：更新该 Agent 的进度行
+      const agentEl = toolContainer.querySelector(`[data-agent="${data.agent}"]`);
+      if (agentEl) {
+        const icon = agentEl.querySelector('span')?.textContent?.charAt(0) || '🔧';
+        const toolDesc = toolLabel(data.tool, data.args);
+        agentEl.innerHTML = `<div class="spinner"></div><span>${toolDesc}</span>`;
+      }
+      scrollToBottom();
+      break;
+    }
+
+    case 'agent_tool_done': {
+      // 子 Agent 的工具完成：更新进度
+      const agentEl = toolContainer.querySelector(`[data-agent="${data.agent}"]`);
+      if (agentEl) {
+        const toolDesc = toolLabel(data.tool, data.args);
+        const label = data.label || '完成';
+        agentEl.innerHTML = `<div class="spinner"></div><span>${toolDesc} — ${label}</span>`;
+      }
+      scrollToBottom();
+      break;
+    }
+
+    case 'agent_done': {
+      // 子 Agent 完成：标记该行为完成
+      const agentEl = toolContainer.querySelector(`[data-agent="${data.agent}"]`);
+      if (agentEl) {
+        agentEl.className = 'tool-status agent-progress done';
+        const icon = data.icon || (data.agent === 'flight' ? '✈️' : '📋');
+        const label = data.label || data.agent;
+        const summary = data.summary || '完成';
+        agentEl.innerHTML = `<span>✅ ${icon} ${label}：${summary}</span>`;
+      }
+      scrollToBottom();
+      break;
+    }
+
+    case 'agent_error': {
+      const agentEl = toolContainer.querySelector(`[data-agent="${data.agent}"]`);
+      if (agentEl) {
+        agentEl.className = 'tool-status agent-progress done';
+        const label = data.label || data.agent;
+        agentEl.innerHTML = `<span>❌ ${label}：${data.error || '执行失败'}</span>`;
+      }
+      scrollToBottom();
+      break;
+    }
+
+    case 'agents_batch_done': {
+      // 批次完成：更新批次容器
+      const batchEl = toolContainer.querySelector('.agent-batch');
+      if (batchEl && batchEl.classList.contains('running')) {
+        batchEl.className = 'tool-status agent-batch done';
+        const successText = data.failed > 0
+          ? `✅ 并行委派完成（${data.success}/${data.count} 成功）`
+          : `✅ 并行委派完成（${data.count} 项全部成功）`;
+        batchEl.innerHTML = `<span>${successText}</span>`;
+      }
+      // 恢复 bubble 的 typing-dots（等待主 Agent 基于结果生成回复）
+      if (!getFullText()) {
+        bubble.innerHTML = '<div class="typing-dots"><span></span><span></span><span></span></div>';
+      }
+      scrollToBottom();
       break;
     }
 
@@ -568,7 +692,8 @@ function toolLabel(name, args) {
       search_flights: '✈️ 机票搜索',
       search_hotels: '🏨 酒店搜索',
       cache_destination_knowledge: '📚 缓存目的地知识',
-      update_trip_info: '📋 更新行程参考书'
+      update_trip_info: '📋 更新行程参考书',
+      delegate_to_agents: '🤖 委派子Agent'
     };
     return nameMap[name] || name;
   }
@@ -590,6 +715,14 @@ function toolLabel(name, args) {
       return `📚 缓存「${args.destination || ''}」知识`;
     case 'update_trip_info':
       return '📋 更新行程参考书';
+    case 'delegate_to_agents': {
+      const agents = (args.tasks || []).map(t => {
+        const icons = { flight: '✈️', research: '📋' };
+        const names = { flight: '机票搜索', research: '目的地调研' };
+        return `${icons[t.agent] || '🔧'}${names[t.agent] || t.agent}`;
+      });
+      return agents.length > 0 ? `🤖 委派：${agents.join(' + ')}` : '🤖 委派子Agent';
+    }
     default:
       return name;
   }

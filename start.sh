@@ -1,5 +1,8 @@
 #!/bin/bash
 # AI Travel Planner — 一键启动脚本
+# 用法: ./start.sh [--debug]
+#   --debug  启用调试模式：终端输出日志 + DEBUG 级别
+#   默认模式：终端不输出日志（日志始终保存到 logs/ 目录）
 
 set -e
 
@@ -7,6 +10,16 @@ BLUE='\033[0;34m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
+
+# 解析参数
+DEBUG_MODE=false
+for arg in "$@"; do
+  case "$arg" in
+    --debug|-d)
+      DEBUG_MODE=true
+      ;;
+  esac
+done
 
 echo ""
 echo -e "${BLUE}🌍 AI Travel Planner${NC}"
@@ -39,6 +52,17 @@ fi
 PORT=${PORT:-3002}
 URL="http://localhost:$PORT"
 
+# 设置日志环境变量
+if [ "$DEBUG_MODE" = true ]; then
+  export LOG_STDOUT=true
+  export LOG_LEVEL=DEBUG
+  echo -e "${YELLOW}🐛 调试模式：终端输出日志 (DEBUG 级别)${NC}"
+else
+  export LOG_STDOUT=false
+  export LOG_LEVEL=INFO
+  echo -e "${GREEN}✓ 日志保存到 logs/ 目录（终端静默）${NC}"
+fi
+
 echo ""
 echo -e "🚀 启动服务于 ${BLUE}${URL}${NC}"
 echo "   按 Ctrl+C 停止"
@@ -56,9 +80,10 @@ echo ""
   fi
 ) &
 
-# 启动服务（限制堆内存避免被系统 OOM Kill）
+# 启动服务（限制堆内存避免被系统 OOM Kill，隐藏 punycode 废弃警告）
+NODE_OPTS="--max-old-space-size=1024 --no-deprecation"
 if [ -f ".env" ]; then
-  node --max-old-space-size=1024 --env-file=.env server.js
+  node $NODE_OPTS --env-file=.env server.js
 else
-  node --max-old-space-size=1024 server.js
+  node $NODE_OPTS server.js
 fi

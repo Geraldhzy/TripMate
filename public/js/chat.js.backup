@@ -1,0 +1,1322 @@
+/**
+ * 聊天核心逻辑
+ * 消息收发、SSE流式接收、Markdown渲染、工具状态展示、行程历史管理
+ */
+
+// ============================================================
+// 状态
+// ============================================================
+let chatHistory = []; // { role, content }
+let isStreaming = false;
+let currentTripId = null; // 当前正在规划的行程 ID（null = 新对话未保存）
+
+// ============================================================
+// 设置管理
+// ============================================================
+function loadSettings() {
+  return {
+    provider: localStorage.getItem('tp_provider') || 'openai',
+    model: localStorage.getItem('tp_model') || 'gpt-4o',
+    apiKey: localStorage.getItem('tp_apiKey') || '',
+    baseUrl: localStorage.getItem('tp_baseUrl') || ''
+  };
+}
+
+function saveSettings() {
+  localStorage.setItem('tp_provider', document.getElementById('provider').value);
+  localStorage.setItem('tp_model', document.getElementById('model').value);
+  localStorage.setItem('tp_apiKey', document.getElementById('apiKey').value);
+  localStorage.setItem('tp_baseUrl', document.getElementById('baseUrl').value);
+  toggleSettings();
+}
+
+function toggleSettings() {
+  const panel = document.getElementById('settings-panel');
+  const overlay = document.getElementById('settings-overlay');
+  const isActive = panel.classList.contains('active');
+  if (!isActive) {
+    // 填充当前值
+    const s = loadSettings();
+    document.getElementById('provider').value = s.provider;
+    document.getElementById('model').value = s.model;
+    document.getElementById('apiKey').value = s.apiKey;
+    document.getElementById('apiKey').placeholder = PROVIDER_PLACEHOLDERS[s.provider] || 'API Key';
+    document.getElementById('baseUrl').value = s.baseUrl;
+  }
+  panel.classList.toggle('active');
+  overlay.classList.toggle('active');
+}
+
+// ============================================================
+// Provider 切换联动
+// ============================================================
+const PROVIDER_MODELS = {
+  openai: [['gpt-4o', 'GPT-4o'], ['gpt-4o-mini', 'GPT-4o Mini']],
+  anthropic: [['claude-sonnet-4-20250514', 'Claude Sonnet 4'], ['claude-opus-4-20250514', 'Claude Opus 4']],
+  deepseek: [['deepseek-chat', 'DeepSeek V3'], ['deepseek-reasoner', 'DeepSeek R1']]
+};
+const PROVIDER_PLACEHOLDERS = {
+  openai: 'sk-...',
+  anthropic: 'sk-ant-...',
+  deepseek: 'sk-...'
+};
+
+document.getElementById('provider').addEventListener('change', function() {
+  const modelSelect = document.getElementById('model');
+  modelSelect.innerHTML = '';
+  (PROVIDER_MODELS[this.value] || []).forEach(([v, t]) => modelSelect.add(new Option(t, v)));
+  document.getElementById('apiKey').placeholder = PROVIDER_PLACEHOLDERS[this.value] || 'API Key';
+});
+
+// ============================================================
+// 消息发送
+// ============================================================
+function sendMessage() {
+  const input = document.getElementById('msg-input');
+  const text = input.value.trim();
+  if (!text || isStreaming) return;
+
+  const settings = loadSettings();
+  if (!settings.apiKey) {
+    alert('请先在设置中配置 API Key');
+    toggleSettings();
+    return;
+  }
+
+  // 添加用户消息
+  chatHistory.push({ role: 'user', content: text });
+  appendUserMessage(text);
+  input.value = '';
+  autoResizeInput();
+  hideWelcome();
+
+  // 发送到后端
+  streamChat(settings);
+}
+
+function sendQuickStart(text) {
+  document.getElementById('msg-input').value = text;
+  sendMessage();
+}
+
+function handleKeyDown(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+}
+
+// 自动调整输入框高度
+const msgInput = document.getElementById('msg-input');
+msgInput.addEventListener('input', autoResizeInput);
+function autoResizeInput() {
+  msgInput.style.height = 'auto';
+  msgInput.style.height = Math.min(msgInput.scrollHeight, 120) + 'px';
+}
+
+// ============================================================
+// SSE 流式聊天
+// ============================================================
+async function streamChat(settings) {
+  isStreaming = true;
+  document.getElementById('send-btn').disabled = true;
+
+  // 创建 assistant 气泡（msgCtx 持有可变引用，round_start 时会更新）
+  const msgCtx = appendAssistantMessage();
+  let fullText = '';    // 全部轮次文本（存入 chatHistory）
+  let roundText = '';   // 当前轮次文本（渲染当前 bubble）
+
+  // 前端请求超时保护（8分钟）— 委派机票搜索时可能需要较长时间
+  const CHAT_TIMEOUT_MS = 480000;
+  const abortController = new AbortController();
+  const timeoutId = setTimeout(() => abortController.abort(), CHAT_TIMEOUT_MS);
+
+  try {
+    const headers = {
+      'Content-Type': 'application/json',
+      'X-Api-Key': settings.apiKey
+    };
+    if (settings.baseUrl) {
+      headers['X-Base-Url'] = settings.baseUrl;
+    }
+
+    // 构建请求体（汇率/天气/TripBook 通过 body 传递，避免 header 编码问题）
+    const bodyPayload = {
+      messages: chatHistory,
+      provider: settings.provider,
+      model: settings.model
+    };
+    // Restore TripBook snapshot from client-side sessionStorage for cross-request context
+    try {
+      const tripBookSnapshot = sessionStorage.getItem('tp_tripbook_snapshot')
+                             || sessionStorage.getItem('tp_tripbook');
+      if (tripBookSnapshot) bodyPayload.tripBookSnapshot = JSON.parse(tripBookSnapshot);
+    } catch (err) {
+      // Log snapshot retrieval errors to aid debugging of AI re-asking questions
+      console.warn('[Chat] Failed to parse TripBook snapshot from sessionStorage', {
+        error: err.message,
+        stack: err.stack,
+        storageKeys: Object.keys(sessionStorage).filter(k => k.startsWith('tp_'))
+      });
+    }
+
+    const resp = await fetch('/api/chat', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(bodyPayload),
+      signal: abortController.signal
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ error: resp.statusText }));
+      throw new Error(err.error || '请求失败');
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // 保留未完整的行
+
+      let eventType = null;
+      for (const line of lines) {
+        if (line.startsWith('event: ')) {
+          eventType = line.slice(7).trim();
+        } else if (line.startsWith('data: ') && eventType) {
+          try {
+            const data = JSON.parse(line.slice(6));
+            // round_start 需要重置 roundText 并更新 msgCtx
+            if (eventType === 'round_start') {
+              startNewRound(msgCtx);
+              roundText = '';
+            } else {
+              handleSSEEvent(eventType, data, msgCtx, () => roundText);
+            }
+            if (eventType === 'token') {
+              fullText += data.text;
+              roundText += data.text;
+            }
+          } catch (e) { console.warn('[SSE] event handling error', e); }
+          eventType = null;
+        }
+      }
+    }
+
+    // 保存 assistant 回复
+    if (fullText) {
+      chatHistory.push({ role: 'assistant', content: fullText });
+    }
+
+  } catch (err) {
+    const msg = err.name === 'AbortError' ? '请求超时，请重试' : err.message;
+    msgCtx.bubble.innerHTML = `<span style="color:red">❌ ${escapeHtml(msg)}</span>`;
+  } finally {
+    clearTimeout(timeoutId);
+    isStreaming = false;
+    userScrolledUp = false; // 流式结束，恢复自动滚动
+    hideScrollHint();
+    document.getElementById('send-btn').disabled = false;
+    // 清理所有还在转的 spinner（防止 done 事件丢失时残留）
+    cleanupRunningSpinners(msgCtx.body);
+    flushRender();
+    // 移除空 bubble：含 typing dots、thinking indicator、或完全空白的气泡
+    msgCtx.body.querySelectorAll('.bubble').forEach(b => {
+      if (b.querySelector('.typing-dots') || b.querySelector('.thinking-indicator') || b.textContent.trim().length === 0) {
+        b.remove();
+      }
+    });
+    scrollToBottom();
+    // 每次 AI 回复完成后自动保存当前行程
+    saveTripSnapshot();
+  }
+}
+
+// ============================================================
+// SSE 事件处理
+// ============================================================
+
+/** rAF 节流渲染：累积 token 后在下一帧统一渲染，避免每个 token 都触发 markdown + DOM 重建 */
+let _renderRAF = 0;
+let _pendingRender = null;
+function scheduleRender(bubble, text) {
+  _pendingRender = { bubble, text };
+  if (!_renderRAF) {
+    _renderRAF = requestAnimationFrame(() => {
+      _renderRAF = 0;
+      if (_pendingRender) {
+        _pendingRender.bubble.innerHTML = renderMarkdown(_pendingRender.text);
+        scrollToBottom();
+        _pendingRender = null;
+      }
+    });
+  }
+}
+/** 立即刷新挂起的渲染（流结束时调用，确保最后一帧不丢失） */
+function flushRender() {
+  if (_renderRAF) {
+    cancelAnimationFrame(_renderRAF);
+    _renderRAF = 0;
+  }
+  if (_pendingRender) {
+    _pendingRender.bubble.innerHTML = renderMarkdown(_pendingRender.text);
+    scrollToBottom();
+    _pendingRender = null;
+  }
+}
+
+function handleSSEEvent(type, data, msgCtx, getRoundText) {
+  const bubble = msgCtx.bubble;
+  const toolContainer = msgCtx.toolContainer;
+  switch (type) {
+    case 'thinking':
+      // 保留 typing-dots（隐藏），追加 thinking indicator
+      // 这样工具完成后 showBubbleTypingDotsIfAllDone 仍能找到 dots 来恢复
+      {
+        const dots = bubble.querySelector('.typing-dots');
+        if (dots) dots.style.display = 'none';
+        // 避免重复插入 thinking indicator
+        if (!bubble.querySelector('.thinking-indicator')) {
+          const indicator = document.createElement('div');
+          indicator.className = 'thinking-indicator';
+          indicator.innerHTML = '<div class="spinner"></div><span>正在思考……</span>';
+          bubble.appendChild(indicator);
+        } else {
+          bubble.querySelector('.thinking-indicator').style.display = '';
+        }
+      }
+      scrollToBottom();
+      break;
+
+    case 'thinking_done':
+      // 移除 thinking indicator，隐藏 typing dots（等 token 到来时会被替换）
+      {
+        const indicator = bubble.querySelector('.thinking-indicator');
+        if (indicator) indicator.remove();
+        const dots = bubble.querySelector('.typing-dots');
+        if (dots) dots.style.display = 'none';
+      }
+      break;
+
+    case 'token':
+      const currentText = getRoundText() + data.text;
+      scheduleRender(bubble, currentText);
+      break;
+
+    case 'tool_start': {
+      // 工具开始调用 → 隐藏气泡的 typing dots（工具状态区自带 spinner）
+      hideBubbleTypingDots(bubble);
+
+      // delegate_to_agents：跳过外层 tool_start 渲染，由 agents_batch_start 展示详细进度
+      if (data.name === 'delegate_to_agents') {
+        // 记录 toolId 以便 tool_result 时跳过
+        toolContainer.dataset['delegate_' + (data.id || '')] = 'delegate';
+        break;
+      }
+
+      // search_flights / search_hotels 聚合显示：多条航线合并为一行
+      if (GROUPED_TOOLS.includes(data.name)) {
+        const groupKey = `group_${data.name}`;
+        let groupEl = toolContainer.querySelector(`[data-group="${data.name}"]`);
+        if (!groupEl) {
+          groupEl = document.createElement('div');
+          groupEl.className = 'tool-status running';
+          groupEl.dataset.group = data.name;
+          groupEl.dataset.total = '0';
+          groupEl.dataset.done = '0';
+          toolContainer.appendChild(groupEl);
+        }
+        const total = parseInt(groupEl.dataset.total) + 1;
+        groupEl.dataset.total = total;
+        // 记录每个 id 映射到 group
+        toolContainer.dataset[data.id || data.name] = data.name;
+        groupEl.innerHTML = `<div class="spinner"></div><span>${groupLabel(data.name, total, 0)}</span>`;
+        scrollToBottom();
+        break;
+      }
+      // 其他工具：单独展示，保留完整搜索内容
+      const toolEl = document.createElement('div');
+      toolEl.className = 'tool-status running';
+      toolEl.dataset.toolId = data.id || data.name;
+      const label = toolLabel(data.name, data.arguments);
+      toolEl.dataset.label = label;
+      toolEl.innerHTML = `<div class="spinner"></div><span>${label}</span>`;
+      toolContainer.appendChild(toolEl);
+      scrollToBottom();
+      break;
+    }
+
+    case 'tool_result': {
+      const key = data.id || data.name;
+      // delegate_to_agents：跳过外层 tool_result，由 agents_batch_done 展示
+      if (toolContainer.dataset['delegate_' + key] === 'delegate') {
+        showBubbleTypingDotsIfAllDone(toolContainer, bubble);
+        break;
+      }
+      // 检查是否属于聚合组
+      const groupName = toolContainer.dataset[key];
+      if (groupName) {
+        const groupEl = toolContainer.querySelector(`[data-group="${groupName}"]`);
+        if (groupEl) {
+          const total = parseInt(groupEl.dataset.total);
+          const done = parseInt(groupEl.dataset.done) + 1;
+          groupEl.dataset.done = done;
+          if (done >= total) {
+            groupEl.className = 'tool-status done';
+            groupEl.innerHTML = `<span>${groupLabel(groupName, total, total)}</span>`;
+          } else {
+            groupEl.innerHTML = `<div class="spinner"></div><span>${groupLabel(groupName, total, done)}</span>`;
+          }
+        }
+        // 所有工具完成 → 恢复 typing dots 等待 LLM 输出
+        showBubbleTypingDotsIfAllDone(toolContainer, bubble);
+        break;
+      }
+      // 普通工具：优先用服务端生成的 resultLabel，其次用原始搜索内容标签
+      const runningEl = toolContainer.querySelector(`[data-tool-id="${key}"]`);
+      if (runningEl) {
+        runningEl.className = 'tool-status done';
+        const doneLabel = toolLabel(data.name, null);  // nameMap 中的完成态文案
+        const startLabel = runningEl.dataset.label;     // tool_start 时带参数的详细文案
+        // 有 resultLabel 时拼到详细文案后；无 resultLabel 时优先用 nameMap 完成态文案
+        const displayLabel = data.resultLabel
+          ? `${startLabel || doneLabel} — ${data.resultLabel}`
+          : (doneLabel || startLabel);
+        runningEl.innerHTML = `<span>✅ ${displayLabel}</span>`;
+      }
+      // 所有工具完成 → 恢复 typing dots 等待 LLM 输出
+      showBubbleTypingDotsIfAllDone(toolContainer, bubble);
+      break;
+    }
+
+    case 'itinerary_update':
+      if (typeof updateItinerary === 'function') updateItinerary(data);
+      break;
+
+    case 'tripbook_update': {
+      // 提取并存储完整快照（供服务端恢复 TripBook）
+      const snapshot = data._snapshot;
+      if (snapshot) {
+        try {
+          sessionStorage.setItem('tp_tripbook_snapshot', JSON.stringify(snapshot));
+        } catch (err) {
+          console.error('[Chat] Failed to store TripBook snapshot in sessionStorage', {
+            error: err.message,
+            snapshotSize: JSON.stringify(snapshot).length
+          });
+        }
+      }
+      // 面板渲染用去掉 _snapshot 的数据（避免 itinerary.js 处理多余字段）
+      const panelData = { ...data };
+      delete panelData._snapshot;
+      if (typeof updateFromTripBook === 'function') updateFromTripBook(panelData);
+      // 同时保存面板数据（供页面刷新时快速恢复面板）
+      try { sessionStorage.setItem('tp_tripbook', JSON.stringify(panelData)); } catch {}
+      break;
+    }
+
+    // ── 子 Agent 委派进度事件 ──
+    // 设计：一个紧凑面板，每个 agent 一行，动态更新进度
+
+    case 'agents_batch_start': {
+      hideBubbleTypingDots(bubble);
+      const panel = document.createElement('div');
+      panel.className = 'delegate-panel';
+      panel.dataset.totalFlights = '0';
+      panel.dataset.agentsDone = '0';
+      panel.dataset.agentsTotal = String(data.count || 0);
+      // 根据委派的 agent 类型生成 header
+      const agentLabels = (data.agents || []).map(a => `${a.icon || '🔧'} ${a.label || a.agent}`).join(' + ');
+      panel.innerHTML = `
+        <div class="delegate-panel-header">
+          <span>${agentLabels || '🔍 正在搜索…'} 进行中…</span>
+        </div>
+        <div class="delegate-panel-routes"></div>
+      `;
+      toolContainer.appendChild(panel);
+      scrollToBottom();
+      break;
+    }
+
+    case 'agent_start': {
+      const panel = toolContainer.querySelector('.delegate-panel');
+      if (panel) {
+        const routesEl = panel.querySelector('.delegate-panel-routes');
+        const routeEl = document.createElement('div');
+        routeEl.className = 'delegate-route running';
+        routeEl.dataset.agent = data.agent || '';
+        const icon = data.icon || (data.agent === 'flight' ? '✈️' : '📋');
+        const label = data.label || data.agent || '子任务';
+        const taskPreview = data.task ? ` — ${escapeHtml(data.task)}` : '';
+        routeEl.dataset.routeText = `${icon} ${label}`;
+        routeEl.dataset.flights = '0';
+        routeEl.innerHTML = `<div class="spinner small"></div><span>${icon} ${escapeHtml(label)}${taskPreview} 搜索中</span>`;
+        routesEl.appendChild(routeEl);
+      }
+      scrollToBottom();
+      break;
+    }
+
+    case 'agent_tool': {
+      // 不新增行，只更新对应路线的搜索提示
+      break;
+    }
+
+    case 'agent_tool_done': {
+      const panel = toolContainer.querySelector('.delegate-panel');
+      if (!panel) break;
+      // 找到对应 agent 的行
+      const agentRoute = panel.querySelector(`.delegate-route.running[data-agent="${data.agent}"]`);
+
+      if (data.tool === 'search_flights') {
+        const match = (data.label || '').match(/(\d+)\s*个航班/);
+        const flights = match ? parseInt(match[1]) : 0;
+        const totalFlights = parseInt(panel.dataset.totalFlights || '0') + flights;
+        panel.dataset.totalFlights = totalFlights;
+        if (agentRoute) {
+          const rf = parseInt(agentRoute.dataset.flights || '0') + flights;
+          agentRoute.dataset.flights = rf;
+          agentRoute.innerHTML = `<div class="spinner small"></div><span>${escapeHtml(agentRoute.dataset.routeText)} 已找到 ${rf} 个航班</span>`;
+        }
+      } else if (data.tool === 'web_search' && agentRoute) {
+        // research agent 的 web_search 进度
+        const doneCount = parseInt(agentRoute.dataset.searchDone || '0') + 1;
+        agentRoute.dataset.searchDone = doneCount;
+        agentRoute.innerHTML = `<div class="spinner small"></div><span>${escapeHtml(agentRoute.dataset.routeText)} 已完成 ${doneCount} 项搜索</span>`;
+      }
+      break;
+    }
+
+    case 'agent_done': {
+      const panel = toolContainer.querySelector('.delegate-panel');
+      if (panel) {
+        const routeEl = panel.querySelector(`.delegate-route.running[data-agent="${data.agent}"]`);
+        if (routeEl) {
+          routeEl.classList.remove('running');
+          routeEl.classList.add('done');
+          // 根据 agent 类型生成完成文案
+          let summary = data.summary || '完成';
+          if (data.agent === 'flight') {
+            const flights = routeEl.dataset.flights || '0';
+            summary = `找到 ${flights} 个航班`;
+          }
+          routeEl.innerHTML = `<span>✅ ${escapeHtml(routeEl.dataset.routeText)} ${escapeHtml(summary)}</span>`;
+        }
+        panel.dataset.agentsDone = parseInt(panel.dataset.agentsDone || '0') + 1;
+      }
+      break;
+    }
+
+    case 'agent_error': {
+      const panel = toolContainer.querySelector('.delegate-panel');
+      if (panel) {
+        const routeEl = panel.querySelector(`.delegate-route.running[data-agent="${data.agent}"]`);
+        if (routeEl) {
+          routeEl.classList.remove('running');
+          routeEl.classList.add('error');
+          const errMsg = data.error === '执行超时' ? '搜索超时' : (data.error || '搜索失败');
+          routeEl.innerHTML = `<span>⚠️ ${escapeHtml(routeEl.dataset.routeText)} ${escapeHtml(errMsg)}</span>`;
+        }
+        panel.dataset.agentsDone = parseInt(panel.dataset.agentsDone || '0') + 1;
+      }
+      break;
+    }
+
+    case 'agents_batch_done': {
+      const panel = toolContainer.querySelector('.delegate-panel');
+      if (panel) {
+        const headerEl = panel.querySelector('.delegate-panel-header');
+        if (headerEl) {
+          const totalFlights = panel.dataset.totalFlights || '0';
+          const flightInfo = parseInt(totalFlights) > 0 ? `，找到 ${totalFlights} 个航班` : '';
+          headerEl.innerHTML = `<span>✅ 搜索完成${flightInfo}</span>`;
+          headerEl.classList.add('done');
+        }
+        panel.classList.add('collapsed');
+      }
+      showBubbleTypingDotsIfAllDone(toolContainer, bubble);
+      break;
+    }
+
+    case 'quick_replies':
+      renderQuickReplies(data, bubble);
+      break;
+
+    case 'error':
+      bubble.innerHTML += `<br><span style="color:red">❌ ${escapeHtml(data.message)}</span>`;
+      break;
+
+    case 'done':
+      // 把所有还在 running 状态的 spinner 全部标记完成（防止残留）
+      cleanupRunningSpinners(msgCtx.body);
+      break;
+  }
+}
+
+// 聚合展示的工具（同类多次调用合并为一行）
+const GROUPED_TOOLS = ['search_flights', 'search_hotels'];
+
+/** 将所有 running 状态的 spinner 标记完成（防止残留） */
+function cleanupRunningSpinners(container) {
+  container.querySelectorAll('.tool-status.running').forEach(el => {
+    el.className = 'tool-status done';
+    if (el.dataset.group) {
+      const total = parseInt(el.dataset.total);
+      el.innerHTML = `<span>${groupLabel(el.dataset.group, total, total)}</span>`;
+    } else {
+      const originalLabel = el.dataset.label || el.querySelector('span')?.textContent || '工具';
+      el.innerHTML = `<span>✅ ${originalLabel}</span>`;
+    }
+  });
+  // 清理委派进度面板中残留的 running 状态
+  container.querySelectorAll('.delegate-panel').forEach(panel => {
+    const headerEl = panel.querySelector('.delegate-panel-header');
+    if (headerEl && !headerEl.classList.contains('done')) {
+      const totalFlights = panel.dataset.totalFlights || '0';
+      const flightInfo = parseInt(totalFlights) > 0 ? `，找到 ${totalFlights} 个航班` : '';
+      headerEl.innerHTML = `<span>✅ 搜索完成${flightInfo}</span>`;
+      headerEl.classList.add('done');
+      panel.classList.add('collapsed');
+    }
+    panel.querySelectorAll('.delegate-route.running').forEach(r => {
+      r.classList.remove('running');
+      r.classList.add('done');
+      const routeText = r.dataset.routeText || '';
+      r.innerHTML = `<span>✅ ${escapeHtml(routeText)} 完成</span>`;
+    });
+  });
+}
+
+const TYPING_DOTS_HTML = '<div class="typing-dots"><span></span><span></span><span></span></div>';
+
+/** 隐藏气泡中的 typing dots（工具开始调用时，避免同时显示两种加载态） */
+function hideBubbleTypingDots(bubble) {
+  const dots = bubble.querySelector('.typing-dots');
+  if (dots) dots.style.display = 'none';
+  const thinking = bubble.querySelector('.thinking-indicator');
+  if (thinking) thinking.style.display = 'none';
+}
+
+/** 当本轮所有工具完成后，恢复气泡的加载指示（等待 LLM 继续输出） */
+function showBubbleTypingDotsIfAllDone(toolContainer, bubble) {
+  // 还有工具在跑，不恢复
+  if (toolContainer.querySelector('.tool-status.running')) return;
+  // 委派面板中还有 running 的路线，不恢复
+  if (toolContainer.querySelector('.delegate-route.running')) return;
+
+  // 优先恢复已有的 typing dots / thinking indicator
+  const dots = bubble.querySelector('.typing-dots');
+  const thinking = bubble.querySelector('.thinking-indicator');
+  if (dots) {
+    dots.style.display = '';
+    return;
+  }
+  if (thinking) {
+    thinking.style.display = '';
+    return;
+  }
+
+  // 如果气泡中没有任何加载指示（可能被 innerHTML 替换丢失），重新注入 typing dots
+  // 但仅当气泡目前为空或只有不可见内容时才注入（避免覆盖已有文本）
+  const hasVisibleText = bubble.textContent.trim().length > 0;
+  if (!hasVisibleText) {
+    bubble.innerHTML = TYPING_DOTS_HTML;
+  }
+}
+
+/** 创建一轮的工具容器 + 气泡（含 typing dots），追加到 parent */
+function createRoundElements(parent) {
+  const toolContainer = document.createElement('div');
+  toolContainer.className = 'tool-container';
+  parent.appendChild(toolContainer);
+
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.innerHTML = TYPING_DOTS_HTML;
+  parent.appendChild(bubble);
+
+  return { toolContainer, bubble };
+}
+
+/** 开始新一轮 LLM 调用：插入分隔线 + 新工具容器 + 新气泡 */
+function startNewRound(msgCtx) {
+  // 上一轮 bubble 若仍只含 typing dots / thinking indicator / 完全空白（该轮无文本输出），移除避免空气泡堆叠
+  const hasTypingDots = !!msgCtx.bubble.querySelector('.typing-dots');
+  const hasThinking = !!msgCtx.bubble.querySelector('.thinking-indicator');
+  const isEmpty = msgCtx.bubble.textContent.trim().length === 0;
+  const hadText = !hasTypingDots && !hasThinking && !isEmpty;
+
+  if (!hadText) {
+    msgCtx.bubble.remove();
+  }
+
+  // 仅当上一轮有文本输出时才加分隔线（纯工具轮次视觉上合并）
+  if (hadText) {
+    const divider = document.createElement('div');
+    divider.className = 'round-divider';
+    msgCtx.body.appendChild(divider);
+  }
+
+  const { toolContainer, bubble } = createRoundElements(msgCtx.body);
+  msgCtx.bubble = bubble;
+  msgCtx.toolContainer = toolContainer;
+  scrollToBottom();
+}
+
+// ============================================================
+// Quick Reply Chips 渲染
+// ============================================================
+function renderQuickReplies(data, bubble) {
+  if (!data.questions || data.questions.length === 0) return;
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'quick-replies-wrapper';
+
+  // 每组问题的选中状态
+  const selections = {}; // groupIdx → string (single) or array (multi)
+
+  const groups = data.questions;
+  groups.forEach((q, gIdx) => {
+    const isMulti = !!q.multiSelect;
+    selections[gIdx] = isMulti ? [] : '';
+
+    const group = document.createElement('div');
+    group.className = 'quick-replies';
+    group.dataset.groupIdx = gIdx;
+
+    // 问题标签
+    if (q.text) {
+      const label = document.createElement('span');
+      label.className = 'quick-reply-label';
+      label.textContent = q.text + (isMulti ? '（可多选）' : '');
+      group.appendChild(label);
+    }
+
+    // 选项按钮
+    for (const opt of q.options) {
+      const btn = document.createElement('button');
+      btn.className = 'quick-reply-chip';
+      btn.textContent = opt;
+      btn.addEventListener('click', () => {
+        if (isMulti) {
+          // 多选：toggle 单个 chip
+          btn.classList.toggle('selected');
+          const arr = [];
+          group.querySelectorAll('.quick-reply-chip.selected').forEach(b => arr.push(b.textContent));
+          selections[gIdx] = arr;
+        } else {
+          // 单选：取消同组其他选中
+          group.querySelectorAll('.quick-reply-chip').forEach(b => b.classList.remove('selected'));
+          btn.classList.add('selected');
+          selections[gIdx] = opt;
+        }
+        // 如果有输入框，清空它
+        const inp = group.querySelector('.quick-reply-input');
+        if (inp) inp.value = '';
+        updateConfirmBtn();
+      });
+      group.appendChild(btn);
+    }
+
+    // 可选：自定义输入框
+    if (q.allowInput) {
+      const inputWrap = document.createElement('div');
+      inputWrap.className = 'quick-reply-input-wrap';
+
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'quick-reply-input';
+      input.placeholder = q.inputPlaceholder || '请输入';
+
+      input.addEventListener('input', () => {
+        const val = input.value.trim();
+        const isMulti = !!q.multiSelect;
+        if (val) {
+          if (!isMulti) {
+            // 单选：有输入时取消 chip 选中
+            group.querySelectorAll('.quick-reply-chip').forEach(b => b.classList.remove('selected'));
+          }
+          // 输入值追加到多选或替代单选
+          if (isMulti) {
+            const arr = [];
+            group.querySelectorAll('.quick-reply-chip.selected').forEach(b => arr.push(b.textContent));
+            arr.push(val);
+            selections[gIdx] = arr;
+          } else {
+            selections[gIdx] = val;
+          }
+        } else {
+          // 清空时恢复 chip 选择
+          if (isMulti) {
+            const arr = [];
+            group.querySelectorAll('.quick-reply-chip.selected').forEach(b => arr.push(b.textContent));
+            selections[gIdx] = arr;
+          } else {
+            const sel = group.querySelector('.quick-reply-chip.selected');
+            selections[gIdx] = sel ? sel.textContent : '';
+          }
+        }
+        updateConfirmBtn();
+      });
+
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          // Enter 时如果所有都已填就直接确认
+          if (canConfirm()) doConfirm();
+        }
+      });
+
+      inputWrap.appendChild(input);
+      group.appendChild(inputWrap);
+    }
+
+    wrapper.appendChild(group);
+  });
+
+  // ── 确认按钮 ──
+  const confirmRow = document.createElement('div');
+  confirmRow.className = 'quick-replies-confirm';
+
+  const confirmBtn = document.createElement('button');
+  confirmBtn.className = 'quick-reply-confirm-btn';
+  confirmBtn.textContent = '确认提交';
+  confirmBtn.disabled = true;
+  confirmBtn.addEventListener('click', doConfirm);
+  confirmRow.appendChild(confirmBtn);
+  wrapper.appendChild(confirmRow);
+
+  function canConfirm() {
+    // 只要有至少一组有选择就可以确认
+    return Object.values(selections).some(v => Array.isArray(v) ? v.length > 0 : v !== '');
+  }
+
+  function updateConfirmBtn() {
+    confirmBtn.disabled = !canConfirm();
+  }
+
+  function doConfirm() {
+    if (!canConfirm()) return;
+
+    // 禁用所有组件
+    wrapper.querySelectorAll('.quick-reply-chip').forEach(b => {
+      b.disabled = true;
+      if (!b.classList.contains('selected')) b.classList.add('used');
+    });
+    wrapper.querySelectorAll('.quick-reply-input').forEach(inp => inp.disabled = true);
+    confirmBtn.disabled = true;
+    confirmBtn.classList.add('used');
+
+    // 拼接所有回答为一条消息
+    const parts = [];
+    groups.forEach((q, gIdx) => {
+      const answer = selections[gIdx];
+      const hasAnswer = Array.isArray(answer) ? answer.length > 0 : answer !== '';
+      if (hasAnswer) {
+        const answerText = Array.isArray(answer) ? answer.join('、') : answer;
+        // 如果问题有标签，用「标签：答案」格式；否则只放答案
+        if (q.text) {
+          const label = q.text.replace(/[？?]/g, '');
+          parts.push(`${label}：${answerText}`);
+        } else {
+          parts.push(answerText);
+        }
+      }
+    });
+
+    const combined = parts.join('，');
+    document.getElementById('msg-input').value = combined;
+    sendMessage();
+  }
+
+  // 嵌入气泡内部，让选项和正文融为一体
+  bubble.appendChild(wrapper);
+  scrollToBottom();
+}
+
+function groupLabel(name, total, done) {
+  const icons = { search_flights: '✈️', search_hotels: '🏨', web_search: '🔍' };
+  const nouns = { search_flights: '条航线', search_hotels: '家酒店', web_search: '次搜索' };
+  const verbs = { search_flights: '机票', search_hotels: '酒店', web_search: '资料' };
+  const icon = icons[name] || '🔍';
+  const noun = nouns[name] || '条结果';
+  const verb = verbs[name] || '信息';
+  if (done >= total) {
+    return `✅ ${icon} 已完成 ${total} ${noun}`;
+  }
+  if (done === 0) {
+    return `${icon} 正在查询${verb}…`;
+  }
+  return `${icon} 正在查询${verb}… (${done}/${total})`;
+}
+
+// update_trip_info 字段标签（模块级常量，避免每次调用 toolLabel 时重建）
+const CONSTRAINT_LABELS = { destination: '目的地', departCity: '出发城市', dates: '日期', people: '人数', budget: '预算', preferences: '偏好', specialRequests: '特殊需求' };
+const ITINERARY_LABELS = { route: '路线', days: '每日行程', budgetSummary: '预算摘要', reminders: '提醒事项', practicalInfo: '实用信息' };
+
+function toolLabel(name, args) {
+  // 无 args 时只返回工具名（用于完成状态）
+  if (!args) {
+    const nameMap = {
+      web_search: '🔍 网页搜索',
+      get_weather: '🌤️ 天气查询',
+      get_exchange_rate: '💱 汇率查询',
+      search_poi: '📍 地点搜索',
+      search_flights: '✈️ 机票搜索',
+      search_hotels: '🏨 酒店搜索',
+      cache_destination_knowledge: '📚 缓存目的地知识',
+      update_trip_info: '📋 行程规划已更新',
+      delegate_to_agents: '✈️ 已找到飞行方案'
+    };
+    return nameMap[name] || name;
+  }
+  // 有 args 时显示具体内容
+  switch (name) {
+    case 'web_search':
+      return `🔍 搜索「${args.query || ''}」`;
+    case 'get_weather':
+      return `🌤️ 查询 ${args.city || ''} 天气`;
+    case 'get_exchange_rate':
+      return `💱 查询 ${args.from || ''}→${args.to || 'CNY'} 汇率`;
+    case 'search_poi':
+      return `📍 搜索地点「${args.keyword || args.query || ''}」${args.city ? ' · ' + args.city : ''}`;
+    case 'search_flights':
+      return `✈️ 查询 ${args.origin || ''}→${args.destination || ''} ${args.date || ''} 机票`;
+    case 'search_hotels':
+      return `🏨 搜索 ${args.city || ''} ${args.check_in || ''} 酒店`;
+    case 'cache_destination_knowledge':
+      return `📚 缓存「${args.destination || ''}」知识`;
+    case 'update_trip_info': {
+      const parts = [];
+      if (args.constraints) {
+        const fields = Object.keys(args.constraints).filter(k => k !== '_reason').map(f => CONSTRAINT_LABELS[f] || f);
+        if (fields.length) parts.push(`记录${fields.join('、')}`);
+      }
+      if (args.itinerary) {
+        const fields = Object.keys(args.itinerary).map(f => ITINERARY_LABELS[f] || f);
+        if (fields.length) parts.push(`更新${fields.join('、')}`);
+      }
+      if (args.phase) parts.push(`阶段${args.phase}/4`);
+      return parts.length ? `📋 ${parts.join('，')}…` : '📋 正在更新行程规划…';
+    }
+    case 'delegate_to_agents':
+      return '✈️ 正在寻找最佳飞行方案…';
+    default:
+      return name;
+  }
+}
+
+// ============================================================
+// 行程历史管理
+// ============================================================
+const TRIPS_KEY = 'tp_trips';
+
+function loadTrips() {
+  try {
+    return JSON.parse(localStorage.getItem(TRIPS_KEY) || '[]');
+  } catch { return []; }
+}
+
+function saveTrips(trips) {
+  localStorage.setItem(TRIPS_KEY, JSON.stringify(trips));
+}
+
+function generateTripTitle() {
+  const firstUser = chatHistory.find(m => m.role === 'user');
+  if (!firstUser) return '未命名行程';
+  return firstUser.content.trim().substring(0, 24) + (firstUser.content.length > 24 ? '…' : '');
+}
+
+function saveTripSnapshot() {
+  if (chatHistory.length === 0) return;
+  const trips = loadTrips();
+  const now = Date.now();
+  
+  // Capture latest TripBook state
+  let tripBookSnapshot = {};
+  try {
+    const stored = sessionStorage.getItem('tp_tripbook_snapshot')
+                 || sessionStorage.getItem('tp_tripbook');
+    if (stored) tripBookSnapshot = JSON.parse(stored);
+  } catch {}
+  
+  if (currentTripId) {
+    const idx = trips.findIndex(t => t.id === currentTripId);
+    if (idx !== -1) {
+      trips[idx].messages = [...chatHistory];
+      trips[idx].updatedAt = now;
+      trips[idx].title = generateTripTitle();
+      trips[idx].tripBookSnapshot = tripBookSnapshot;
+      saveTrips(trips);
+      return;
+    }
+  }
+  // 新行程
+  const newTrip = {
+    id: 'trip_' + now + '_' + Math.random().toString(36).slice(2, 7),
+    title: generateTripTitle(),
+    createdAt: now,
+    updatedAt: now,
+    messages: [...chatHistory],
+    tripBookSnapshot: tripBookSnapshot
+  };
+  currentTripId = newTrip.id;
+  trips.unshift(newTrip);
+  saveTrips(trips);
+}
+
+function deleteTrip(id, event) {
+  event.stopPropagation();
+  const trips = loadTrips().filter(t => t.id !== id);
+  saveTrips(trips);
+  if (currentTripId === id) {
+    currentTripId = null;
+    chatHistory = [];
+    resetToWelcome();
+  }
+  renderHistoryList();
+}
+
+function loadTripById(id) {
+  const trips = loadTrips();
+  const trip = trips.find(t => t.id === id);
+  if (!trip) return;
+  currentTripId = trip.id;
+  chatHistory = [...trip.messages];
+  restoreChatUI();
+  
+  // Restore TripBook snapshot if available
+  if (trip.tripBookSnapshot && Object.keys(trip.tripBookSnapshot).length > 0) {
+    try {
+      const snap = trip.tripBookSnapshot;
+      // 如果是完整快照（有 constraints 字段），分别设置
+      if (snap.constraints || snap.itinerary) {
+        sessionStorage.setItem('tp_tripbook_snapshot', JSON.stringify(snap));
+      } else {
+        // 旧格式面板数据，直接用
+        sessionStorage.setItem('tp_tripbook', JSON.stringify(snap));
+      }
+      // Update itinerary panel from restored snapshot
+      if (typeof updateFromTripBook === 'function') {
+        updateFromTripBook(snap);
+      }
+    } catch (e) {
+      console.warn('Failed to restore TripBook snapshot:', e);
+    }
+  }
+  
+  toggleHistory();
+  renderHistoryList();
+}
+
+function restoreChatUI() {
+  const chatArea = document.getElementById('chat-area');
+  chatArea.innerHTML = '';
+  for (const msg of chatHistory) {
+    if (msg.role === 'user') {
+      const div = document.createElement('div');
+      div.className = 'message user';
+      div.innerHTML = `<div class="avatar user-avatar">✈</div><div class="bubble">${escapeHtml(msg.content)}</div>`;
+      chatArea.appendChild(div);
+    } else if (msg.role === 'assistant') {
+      const div = document.createElement('div');
+      div.className = 'message assistant';
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      bubble.innerHTML = renderMarkdown(msg.content);
+      div.innerHTML = '<div class="avatar ai-avatar">🌍</div>';
+      div.appendChild(bubble);
+      chatArea.appendChild(div);
+    }
+  }
+  scrollToBottom();
+}
+
+function resetToWelcome() {
+  const chatArea = document.getElementById('chat-area');
+  chatArea.innerHTML = `
+    <div class="welcome-msg">
+      <div class="welcome-card">
+        <span class="welcome-icon">🌍</span>
+        <h2>你好，我是 AI 旅行规划师</h2>
+        <p class="welcome-sub"><span>告诉我你想去哪里，我帮你从零到一规划旅行。</span></p>
+        <div class="welcome-caps">
+          <span class="welcome-cap">✈️ 实时机票</span>
+          <span class="welcome-cap">🌤️ 天气预报</span>
+          <span class="welcome-cap">💱 汇率转换</span>
+          <span class="welcome-cap">📍 景点餐厅</span>
+        </div>
+        <div class="quick-starts">
+          <button class="quick-btn" onclick="sendQuickStart('帮我规划一个7天的日本东京+京都+大阪之旅，想体验文化美食和购物')">🗼 日本东京·京都·大阪</button>
+          <button class="quick-btn" onclick="sendQuickStart('帮我规划一个10天的西欧之旅，包括法国巴黎和意大利罗马，预算2万左右')">🗺️ 西欧巴黎·罗马之旅</button>
+          <button class="quick-btn" onclick="sendQuickStart('我想五一去马来西亚沙巴玩，想体验潜水和雨林，帮我规划一下')">🏝️ 马来西亚沙巴潜水</button>
+          <button class="quick-btn" onclick="sendQuickStart('帮我规划一个5天的泰国清迈+曼谷之旅，喜欢寺庙文化和街头美食')">🍜 泰国清迈·曼谷</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderHistoryList() {
+  const container = document.getElementById('history-list');
+  const trips = loadTrips();
+  if (trips.length === 0) {
+    container.innerHTML = `<div class="history-empty"><p>📭</p><p>暂无保存的行程</p><p>开始规划后将自动保存</p></div>`;
+    return;
+  }
+  container.innerHTML = trips.map(trip => {
+    const date = new Date(trip.updatedAt).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
+    const msgCount = trip.messages.filter(m => m.role === 'user').length;
+    const isActive = trip.id === currentTripId ? ' active-trip' : '';
+    return `
+      <div class="trip-card${isActive}" onclick="loadTripById('${trip.id}')">
+        <button class="trip-card-delete" onclick="deleteTrip('${trip.id}', event)" title="删除">✕</button>
+        <div class="trip-card-title">${escapeHtml(trip.title)}</div>
+        <div class="trip-card-meta">
+          <span>📅 ${date}</span>
+          <span>💬 ${msgCount} 条对话</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function toggleHistory() {
+  const panel = document.getElementById('history-panel');
+  const overlay = document.getElementById('history-overlay');
+  if (!panel.classList.contains('active')) {
+    renderHistoryList();
+  }
+  panel.classList.toggle('active');
+  overlay.classList.toggle('active');
+}
+
+// ============================================================
+// DOM 操作
+// ============================================================
+function appendUserMessage(text) {
+  const chatArea = document.getElementById('chat-area');
+  const div = document.createElement('div');
+  div.className = 'message user';
+  div.innerHTML = `
+    <div class="avatar user-avatar">✈</div>
+    <div class="bubble">${escapeHtml(text)}</div>
+  `;
+  chatArea.appendChild(div);
+  scrollToBottom();
+}
+
+function appendAssistantMessage() {
+  const chatArea = document.getElementById('chat-area');
+
+  // 消息容器
+  const div = document.createElement('div');
+  div.className = 'message assistant';
+
+  // 头像
+  const avatar = document.createElement('div');
+  avatar.className = 'avatar ai-avatar';
+  avatar.textContent = '🌍';
+  div.appendChild(avatar);
+
+  // 消息主体（工具状态 + 气泡）
+  const body = document.createElement('div');
+  body.className = 'message-body';
+
+  const { bubble, toolContainer } = createRoundElements(body);
+
+  div.appendChild(body);
+  chatArea.appendChild(div);
+  scrollToBottom();
+
+  return { bubble, toolContainer, body };
+}
+
+function hideWelcome() {
+  const w = document.querySelector('.welcome-msg');
+  if (w) w.remove();
+}
+
+function clearChat() {
+  // 保存当前对话（如有内容）
+  saveTripSnapshot();
+  chatHistory = [];
+  currentTripId = null;
+  resetToWelcome();
+  // 同步清空行程面板
+  if (typeof clearItinerary === 'function') clearItinerary();
+  // 清空 TripBook 缓存
+  try {
+    sessionStorage.removeItem('tp_tripbook');
+    sessionStorage.removeItem('tp_tripbook_snapshot');
+  } catch {}
+}
+
+// ============================================================
+// 滚动管理：流式输出时允许用户自由上划，滚回底部后恢复自动滚动
+// ============================================================
+let userScrolledUp = false;
+
+function showScrollHint() {
+  let btn = document.getElementById('scroll-hint');
+  if (!btn) {
+    btn = document.createElement('button');
+    btn.id = 'scroll-hint';
+    btn.textContent = '↓ 跳到最新';
+    btn.onclick = () => {
+      userScrolledUp = false;
+      hideScrollHint();
+      const chatArea = document.getElementById('chat-area');
+      chatArea.scrollTop = chatArea.scrollHeight;
+    };
+    document.querySelector('.chat-panel').appendChild(btn);
+  }
+  btn.classList.add('visible');
+}
+
+function hideScrollHint() {
+  const btn = document.getElementById('scroll-hint');
+  if (btn) btn.classList.remove('visible');
+}
+
+(function initScrollWatcher() {
+  const chatArea = document.getElementById('chat-area');
+  chatArea.addEventListener('scroll', () => {
+    if (!isStreaming) { userScrolledUp = false; hideScrollHint(); return; }
+    const distFromBottom = chatArea.scrollHeight - chatArea.scrollTop - chatArea.clientHeight;
+    userScrolledUp = distFromBottom > 20;
+    if (userScrolledUp) showScrollHint(); else hideScrollHint();
+  });
+})();
+
+function scrollToBottom() {
+  if (userScrolledUp) return;
+  const chatArea = document.getElementById('chat-area');
+  chatArea.scrollTop = chatArea.scrollHeight;
+}
+
+// ============================================================
+// Markdown 简易渲染器
+// ============================================================
+function renderMarkdown(text) {
+  // ── 剥离 <think> 块（不展示思考过程） ──
+  text = text.replace(/<think>[\s\S]*?(<\/think>|$)/g, '');
+
+  // ── 剥离泄漏的工具调用标签（模型偶尔在纯文本中输出类XML工具调用） ──
+  // 支持全角 ｜(U+FF5C) 和半角 | 两种变体
+  text = text.replace(/<[｜|]?\s*DSML[\s\S]*?DSML\s*[｜|]?>/g, '');
+  text = text.replace(/<\/?[｜|]?\s*DSML[｜|]?\s*(?:function_calls|invoke|parameter)[^>]*>/g, '');
+  text = text.replace(/<\/?function_calls?>/g, '');
+  text = text.replace(/<\/?invoke[^>]*>/g, '');
+  text = text.replace(/<\/?parameter[^>]*>[^<]*/g, '');
+
+  let html = escapeHtml(text);
+
+  // code blocks
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code class="lang-$1">$2</code></pre>');
+  // inline code
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+  // headers
+  html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+  html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+  // bold & italic
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  // links
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  // blockquote
+  html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
+  // hr
+  html = html.replace(/^---$/gm, '<hr>');
+  // unordered list
+  html = html.replace(/^[-*] (.+)$/gm, '<li>$1</li>');
+  html = html.replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>');
+  // ordered list
+  html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
+  // tables
+  html = html.replace(/^\|(.+)\|$/gm, (match) => {
+    const cells = match.split('|').filter(c => c.trim());
+    if (cells.every(c => /^[-:]+$/.test(c.trim()))) return '';
+    const tag = 'td';
+    return '<tr>' + cells.map(c => `<${tag}>${c.trim()}</${tag}>`).join('') + '</tr>';
+  });
+  html = html.replace(/(<tr>.*<\/tr>[\s]*)+/g, '<table>$&</table>');
+  // 清除 table 内部的换行符，防止后续段落转换把 </p><p> 插入 <tr> 之间（会导致浏览器把孤立 <p> 移到表格外，形成视觉间距）
+  html = html.replace(/<table>([\s\S]*?)<\/table>/g, (_, inner) => '<div class="table-wrapper"><table>' + inner.replace(/\n/g, '') + '</table></div>');
+  // paragraphs — 先折叠多余空行，再转换
+  html = html.replace(/\n{3,}/g, '\n\n');   // 3+ 空行 → 1 个空行
+  html = html.replace(/\n\n/g, '</p><p>');
+  html = html.replace(/\n/g, '<br>');
+  // cleanup: 块级元素前后的多余 <br> / 空 <p>
+  html = html.replace(/<p><\/p>/g, '');
+  html = html.replace(/<p>(<br>\s*)+<\/p>/g, '');
+  // 块元素后紧跟的 <br>
+  html = html.replace(/(<\/h[1-3]>|<\/div>|<\/table>|<\/ul>|<\/ol>|<hr>)(<br>)+/g, '$1');
+  // 块元素前紧跟的 <br>
+  html = html.replace(/(<br>)+(<h[1-3]>|<div class="table-wrapper">|<table>|<ul>|<ol>|<hr>)/g, '$2');
+  // 块元素被多余 <p> 包裹
+  html = html.replace(/<p>(<h[1-3]>|<div class="table-wrapper">|<table>|<ul>|<ol>)/g, '$1');
+  html = html.replace(/(<\/h[1-3]>|<\/div>|<\/table>|<\/ul>|<\/ol>)<\/p>/g, '$1');
+
+  return html;
+}
+
+function escapeHtml(str) {
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ============================================================
+// 委派进度辅助函数
+// ============================================================
+
+/** 从任务描述中提取航线信息，如"从上海…到东京" → "上海 → 东京" */
+function extractRouteFromTask(taskText) {
+  if (!taskText) return '机票';
+  // 匹配多种 LLM 输出格式（从日志中总结）
+  const patterns = [
+    // "从上海（…）到东京（…）"
+    /从(.{2,10}?)(?:\s*[\(（][^)）]*[\)）])?\s*(?:到|→|飞往|至)\s*(.{2,10}?)(?:\s*[\(（][^)）]*[\)）])?(?:的|，|,|\s|$)/,
+    // "搜索上海（…）→大阪关西机场（…）的航班" — 含括号跳过
+    /搜索(.+?)(?:\s*[\(（][^)）]*[\)）])?\s*(?:到|→|飞|至)\s*(.{2,15}?)(?:\s*[\(（][^)）]*[\)）])?(?:的|，|,|\s|$)/,
+    // "上海（…）→大阪（…）" — 无搜索前缀
+    /(.{2,10}?)(?:\s*[\(（][^)）]*[\)）])?\s*→\s*(.{2,10}?)(?:\s*[\(（][^)）]*[\)）])?/,
+    // "出发城市：深圳（SZX）…目的地：亚庇（BKI）"
+    /出发.*?[:：]\s*([^\s\(（,，]{2,6})/,
+  ];
+  for (const pat of patterns) {
+    const m = taskText.match(pat);
+    if (m && m[2]) {
+      // 清理捕获的城市名：去掉"及周边机场"等后缀
+      const clean = s => s.replace(/(?:及周边|周边)(?:机场)?/g, '').trim();
+      return `${clean(m[1])} → ${clean(m[2])}`;
+    }
+    if (m && m[1]) {
+      const city = m[1].replace(/(?:及周边|周边)(?:机场)?/g, '').trim();
+      const destMatch = taskText.match(/目的.*?[:：]\s*([^\s\(（,，]{2,10})/);
+      if (destMatch) return `${city} → ${destMatch[1].trim()}`;
+    }
+  }
+  return '机票';
+}
+
+// ============================================================
+// 初始化
+// ============================================================
+(function init() {
+  // 如果没有设置API Key，自动打开设置面板
+  const s = loadSettings();
+  if (!s.apiKey) {
+    setTimeout(() => toggleSettings(), 500);
+  }
+
+  // 页面关闭/刷新前自动保存当前对话
+  window.addEventListener('beforeunload', () => {
+    saveTripSnapshot();
+  });
+})();

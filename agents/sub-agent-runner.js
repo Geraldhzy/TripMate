@@ -11,8 +11,8 @@ const Anthropic = require('@anthropic-ai/sdk');
 const { AGENT_CONFIGS } = require('./config');
 const log = require('../utils/logger');
 
-// 单个工具结果的最大字符数（避免子 Agent 消息数组内存爆炸）
-const MAX_TOOL_RESULT_CHARS = 8000;
+// 单个工具结果的最大字符数（DeepSeek 支持 128K 上下文，可以给宽裕空间）
+const MAX_TOOL_RESULT_CHARS = 15000;
 
 /**
  * 延迟加载 tools 模块，避免循环依赖
@@ -113,156 +113,171 @@ function getToolLabel(funcName, resultStr) {
   }
 }
 
-/**
- * 运行子 Agent (OpenAI 格式)
- */
-async function runSubAgentOpenAI(agentType, task, apiKey, model, sendSSE, baseUrl, agentLog) {
-  const config = AGENT_CONFIGS[agentType];
-  const aLog = agentLog || log.child({ agent: agentType });
-  const systemPrompt = config.buildPrompt();
-  const tools = getToolsForAgent(agentType, 'openai');
+// ============================================================
+// Provider adapters: normalize LLM request/response differences
+// ============================================================
 
+/**
+ * 创建 provider adapter，统一 LLM 调用和响应格式
+ */
+function createProviderAdapter(provider, apiKey, baseUrl) {
   const clientOpts = { apiKey };
   if (baseUrl) clientOpts.baseURL = baseUrl;
+
+  if (provider === 'anthropic') {
+    const client = new Anthropic(clientOpts);
+    return {
+      defaultModel: 'claude-sonnet-4-20250514',
+      toolFormat: 'anthropic',
+
+      initMessages(systemPrompt, task) {
+        // Anthropic: system is a separate param, not in messages
+        return { system: systemPrompt, messages: [{ role: 'user', content: task }] };
+      },
+
+      async complete(model, system, messages, tools, maxTokens) {
+        const response = await client.messages.create({
+          model,
+          system,
+          messages,
+          tools: tools.length > 0 ? tools : undefined,
+          max_tokens: maxTokens || 4096,
+          temperature: 0.5,
+        });
+        // Normalize response
+        const toolCalls = response.content
+          .filter(b => b.type === 'tool_use')
+          .map(b => ({ id: b.id, name: b.name, args: b.input }));
+        const textContent = response.content
+          .filter(b => b.type === 'text')
+          .map(b => b.text)
+          .join('');
+        return { textContent, toolCalls, rawAssistant: response.content };
+      },
+
+      pushAssistantMessage(messages, rawAssistant) {
+        messages.push({ role: 'assistant', content: rawAssistant });
+      },
+
+      pushToolResults(messages, results) {
+        // Anthropic: tool results go as a single user message array
+        messages.push({
+          role: 'user',
+          content: results.map(r => ({ type: 'tool_result', tool_use_id: r.id, content: r.content }))
+        });
+      },
+    };
+  }
+
+  // OpenAI / DeepSeek (OpenAI-compatible)
   const client = new OpenAI(clientOpts);
+  return {
+    defaultModel: 'gpt-4o',
+    toolFormat: 'openai',
 
-  const messages = [
-    { role: 'system', content: systemPrompt },
-    { role: 'user', content: task }
-  ];
+    initMessages(systemPrompt, task) {
+      return {
+        system: null, // embedded in messages
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: task }
+        ]
+      };
+    },
 
-  // 子 Agent 不做流式（不需要逐 token 展示给用户）
-  const selectedModel = model || 'gpt-4o';
+    async complete(model, _system, messages, tools, maxTokens) {
+      const response = await client.chat.completions.create({
+        model,
+        messages,
+        tools: tools.length > 0 ? tools : undefined,
+        tool_choice: tools.length > 0 ? 'auto' : undefined,
+        temperature: 0.5,
+        max_tokens: maxTokens || 2048,
+      });
+      const choice = response.choices[0];
+      const rawToolCalls = choice.message.tool_calls || [];
+      const toolCalls = rawToolCalls.map(tc => {
+        let args;
+        try { args = JSON.parse(tc.function.arguments); } catch { args = {}; }
+        return { id: tc.id, name: tc.function.name, args };
+      });
+      return { textContent: choice.message.content || '', toolCalls, rawAssistant: choice.message };
+    },
+
+    pushAssistantMessage(messages, rawAssistant) {
+      messages.push(rawAssistant);
+    },
+
+    pushToolResults(messages, results) {
+      // OpenAI: each tool result is a separate message
+      for (const r of results) {
+        messages.push({ role: 'tool', tool_call_id: r.id, content: r.content });
+      }
+    },
+  };
+}
+
+/**
+ * 运行子 Agent（统一的多轮工具调用循环）
+ */
+async function runSubAgentLoop(agentType, task, provider, apiKey, model, sendSSE, baseUrl, agentLog) {
+  const config = AGENT_CONFIGS[agentType];
+  const aLog = agentLog || log.child({ agent: agentType });
+
+  const adapter = createProviderAdapter(provider, apiKey, baseUrl);
+  const selectedModel = model || adapter.defaultModel;
+  const systemPrompt = config.buildPrompt();
+  const tools = getToolsForAgent(agentType, adapter.toolFormat);
+  const { system, messages } = adapter.initMessages(systemPrompt, task);
 
   for (let round = 0; round < config.maxRounds; round++) {
     aLog.debug(`子Agent轮次 ${round + 1}/${config.maxRounds}`);
     const llmTimer = aLog.startTimer('sub_llm_call');
-    const response = await client.chat.completions.create({
-      model: selectedModel,
-      messages,
-      tools: tools.length > 0 ? tools : undefined,
-      tool_choice: tools.length > 0 ? 'auto' : undefined,
-      temperature: 0.5,
-      max_tokens: 2048,
-    });
 
-    const choice = response.choices[0];
-    const toolCalls = choice.message.tool_calls || [];
+    const { textContent, toolCalls, rawAssistant } = await adapter.complete(selectedModel, system, messages, tools, config.maxTokens);
     llmTimer.done({ toolCallCount: toolCalls.length });
 
-    if (toolCalls.length > 0) {
-      // 追加 assistant 消息
-      messages.push(choice.message);
-
-      for (const tc of toolCalls) {
-        const funcName = tc.function.name;
-        let funcArgs;
-        try { funcArgs = JSON.parse(tc.function.arguments); } catch { funcArgs = {}; }
-
-        sendSSE('agent_tool', { agent: agentType, tool: funcName, status: 'running' });
-
-        try {
-          const toolTimer = aLog.startTimer(`sub_tool:${funcName}`);
-          const result = await getTools().executeToolCall(funcName, funcArgs);
-          let resultStr = typeof result === 'string' ? result : JSON.stringify(result);
-          // 截断过长的工具结果，避免子 Agent 消息数组内存爆炸
-          if (resultStr.length > MAX_TOOL_RESULT_CHARS) {
-            aLog.debug('工具结果截断', { tool: funcName, originalLen: resultStr.length, maxLen: MAX_TOOL_RESULT_CHARS });
-            resultStr = resultStr.slice(0, MAX_TOOL_RESULT_CHARS) + '\n…(结果已截断)';
-          }
-          const label = getToolLabel(funcName, resultStr);
-          toolTimer.done({ resultLen: resultStr.length, label });
-
-          sendSSE('agent_tool_done', { agent: agentType, tool: funcName, label });
-          messages.push({ role: 'tool', tool_call_id: tc.id, content: resultStr });
-        } catch (err) {
-          aLog.error('子Agent工具执行失败', { tool: funcName, error: err.message });
-          const errStr = `工具执行失败: ${err.message}`;
-          sendSSE('agent_tool_done', { agent: agentType, tool: funcName, label: '执行失败' });
-          messages.push({ role: 'tool', tool_call_id: tc.id, content: errStr });
-        }
-      }
-      continue;
+    if (toolCalls.length === 0) {
+      return textContent;
     }
 
-    // 无工具调用 → 返回最终结果
-    return choice.message.content || '';
+    // 有工具调用 → 追加 assistant 消息，执行工具，追加结果
+    adapter.pushAssistantMessage(messages, rawAssistant);
+
+    // 并行执行同一轮的所有工具调用（web_search × N 等场景显著提速）
+    for (const tc of toolCalls) {
+      sendSSE('agent_tool', { agent: agentType, tool: tc.name, args: tc.args, status: 'running' });
+    }
+
+    const toolSettled = await Promise.allSettled(toolCalls.map(async (tc) => {
+      const toolTimer = aLog.startTimer(`sub_tool:${tc.name}`);
+      const result = await getTools().executeToolCall(tc.name, tc.args);
+      let resultStr = typeof result === 'string' ? result : JSON.stringify(result);
+      // 截断过长的工具结果，避免子 Agent 消息数组内存爆炸
+      if (resultStr.length > MAX_TOOL_RESULT_CHARS) {
+        aLog.debug('工具结果截断', { tool: tc.name, originalLen: resultStr.length, maxLen: MAX_TOOL_RESULT_CHARS });
+        resultStr = resultStr.slice(0, MAX_TOOL_RESULT_CHARS) + '\n…(结果已截断)';
+      }
+      const label = getToolLabel(tc.name, resultStr);
+      toolTimer.done({ resultLen: resultStr.length, label });
+      sendSSE('agent_tool_done', { agent: agentType, tool: tc.name, args: tc.args, label });
+      return { id: tc.id, content: resultStr };
+    }));
+
+    const toolResults = toolSettled.map((r, i) => {
+      if (r.status === 'fulfilled') return r.value;
+      const tc = toolCalls[i];
+      aLog.error('子Agent工具执行失败', { tool: tc.name, error: r.reason?.message });
+      const errStr = `工具执行失败: ${r.reason?.message || '未知错误'}`;
+      sendSSE('agent_tool_done', { agent: agentType, tool: tc.name, args: tc.args, label: '执行失败' });
+      return { id: tc.id, content: errStr };
+    });
+
+    adapter.pushToolResults(messages, toolResults);
   }
 
   // 达到最大轮次仍有工具调用，返回最后一轮的文本
   return messages[messages.length - 1]?.content || '';
-}
-
-/**
- * 运行子 Agent (Anthropic 格式)
- */
-async function runSubAgentAnthropic(agentType, task, apiKey, model, sendSSE, baseUrl, agentLog) {
-  const config = AGENT_CONFIGS[agentType];
-  const aLog = agentLog || log.child({ agent: agentType });
-  const systemPrompt = config.buildPrompt();
-  const tools = getToolsForAgent(agentType, 'anthropic');
-
-  const clientOpts = { apiKey };
-  if (baseUrl) clientOpts.baseURL = baseUrl;
-  const client = new Anthropic(clientOpts);
-
-  const messages = [{ role: 'user', content: task }];
-  const selectedModel = model || 'claude-sonnet-4-20250514';
-
-  for (let round = 0; round < config.maxRounds; round++) {
-    aLog.debug(`子Agent轮次 ${round + 1}/${config.maxRounds}`);
-    const llmTimer = aLog.startTimer('sub_llm_call');
-    const response = await client.messages.create({
-      model: selectedModel,
-      system: systemPrompt,
-      messages,
-      tools: tools.length > 0 ? tools : undefined,
-      max_tokens: 2048,
-      temperature: 0.5,
-    });
-
-    const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
-    llmTimer.done({ toolCallCount: toolUseBlocks.length });
-
-    if (toolUseBlocks.length > 0) {
-      messages.push({ role: 'assistant', content: response.content });
-
-      const toolResults = [];
-      for (const toolUse of toolUseBlocks) {
-        sendSSE('agent_tool', { agent: agentType, tool: toolUse.name, status: 'running' });
-
-        try {
-          const toolTimer = aLog.startTimer(`sub_tool:${toolUse.name}`);
-          const result = await getTools().executeToolCall(toolUse.name, toolUse.input);
-          let resultStr = typeof result === 'string' ? result : JSON.stringify(result);
-          // 截断过长的工具结果
-          if (resultStr.length > MAX_TOOL_RESULT_CHARS) {
-            aLog.debug('工具结果截断', { tool: toolUse.name, originalLen: resultStr.length, maxLen: MAX_TOOL_RESULT_CHARS });
-            resultStr = resultStr.slice(0, MAX_TOOL_RESULT_CHARS) + '\n…(结果已截断)';
-          }
-          const label = getToolLabel(toolUse.name, resultStr);
-          toolTimer.done({ resultLen: resultStr.length, label });
-
-          sendSSE('agent_tool_done', { agent: agentType, tool: toolUse.name, label });
-          toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: resultStr });
-        } catch (err) {
-          aLog.error('子Agent工具执行失败', { tool: funcName, error: err.message });
-          const errStr = `工具执行失败: ${err.message}`;
-          sendSSE('agent_tool_done', { agent: agentType, tool: toolUse.name, label: '执行失败' });
-          toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: errStr });
-        }
-      }
-
-      messages.push({ role: 'user', content: toolResults });
-      continue;
-    }
-
-    // 无工具调用 → 返回文本
-    const textBlocks = response.content.filter(b => b.type === 'text');
-    return textBlocks.map(b => b.text).join('');
-  }
-
-  return '';
 }
 
 /**
@@ -295,13 +310,7 @@ async function runSubAgent(agentType, task, provider, apiKey, model, sendSSE, ba
   });
 
   try {
-    let result;
-    if (provider === 'anthropic') {
-      result = await runSubAgentAnthropic(agentType, task, apiKey, model, sendSSE, baseUrl, agentLog);
-    } else {
-      // OpenAI and DeepSeek (OpenAI-compatible) both use OpenAI format
-      result = await runSubAgentOpenAI(agentType, task, apiKey, model, sendSSE, baseUrl, agentLog);
-    }
+    const result = await runSubAgentLoop(agentType, task, provider, apiKey, model, sendSSE, baseUrl, agentLog);
 
     const memAfter = process.memoryUsage();
     agentTimer.done({

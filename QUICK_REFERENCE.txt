@@ -1,0 +1,205 @@
+═══════════════════════════════════════════════════════════════════════════════
+                    QUICK REFERENCE CARD
+═══════════════════════════════════════════════════════════════════════════════
+
+THE MAIN LOOP (Lines 567-618)
+─────────────────────────────
+
+for (round = 0; round < 10; round++) {
+
+  ┌─ CALL LLM ─────────────────────────────────────────┐
+  │ Lines 572-574                                      │
+  │ streamOpenAI() OR streamAnthropic()                │
+  │ SSE: token events (real-time)                      │
+  └─────────────────────────────────────────────────────┘
+           │
+           ▼
+  ┌─ CHECK TOOL CALLS ─────────────────────────────────┐
+  │ Line 578: if (toolCalls.length === 0)              │
+  │   NO  → return fullText (EXIT LOOP)                │
+  │   YES → continue                                   │
+  └─────────────────────────────────────────────────────┘
+           │
+           ▼
+  ┌─ PUSH ASSISTANT MESSAGE ───────────────────────────┐
+  │ Lines 583-587                                      │
+  │ messages.push(rawAssistant)  ← has tool_calls      │
+  └─────────────────────────────────────────────────────┘
+           │
+           ▼
+  ┌─ EXECUTE TOOLS ─────────────────────────────────────┐
+  │ Lines 590-604                                       │
+  │ For each tool:                                      │
+  │  - runTool() [lines 253-399]                        │
+  │    - SSE: tool_start (line 277)                    │
+  │    - Execute (line 280-284)                        │
+  │    - SSE: tool_result (line 288)                   │
+  │    - SSE: rate_cached/weather_cached (optional)    │
+  │  - Collect result                                   │
+  └─────────────────────────────────────────────────────┘
+           │
+           ▼
+  ┌─ PUSH TOOL RESULTS ─────────────────────────────────┐
+  │ Lines 607-616                                       │
+  │ messages.push(toolResults)                          │
+  │ (format depends on provider)                        │
+  └─────────────────────────────────────────────────────┘
+           │
+           ▼
+  ← LOOP BACK ← (round++)
+
+}  ← If round >= 10: break, call LLM one more time without tools
+
+
+SSE EVENTS CHEAT SHEET
+──────────────────────
+
+Event              When                    Data
+─────────────────────────────────────────────────────────────
+token              LLM streaming           {text}
+tool_start         Tool about to run       {id, name, args}
+tool_result        Tool finished           {id, name, resultLabel}
+rate_cached        Rate tool ok            {from, to, rate, ...}
+weather_cached     Weather tool ok         {city, forecast, ...}
+tripbook_update    Trip info tool ok       {constraints, itinerary, ...}
+quick_replies      (optional) end          {questions: [...]}
+done               Always at end           {}
+error              Exception thrown        {message}
+
+
+CLIENT EVENT STREAM TIMELINE
+────────────────────────────
+
+FAST ANSWER (no tools):
+  token → token → token → done
+
+WITH ONE TOOL CALL:
+  token → token → tool_start → tool_result → token → done
+
+MULTI-ROUND (2 rounds):
+  token → token → tool_start → tool_result →
+  ← NEW ROUND (LLM called again) →
+  token → token → tool_start → weather_cached → token → done
+
+
+KEY INSIGHTS
+────────────
+
+1. Messages array is state machine
+   - Initial: [system, user message]
+   - Grows each round with: assistant message + tool results
+   - LLM always sees full history
+   - Never cleared
+
+2. Round boundaries are implicit
+   - NO "round_start" event
+   - Client infers: token end → tool events → token resumes
+   - Design: simpler protocol, less overhead
+
+3. Not all tools get special events
+   ✅ get_exchange_rate    → rate_cached
+   ✅ get_weather          → weather_cached
+   ✅ update_trip_info     → tripbook_update
+   ❌ search_flights       → just tool_start/result
+   ❌ search_poi           → just tool_start/result
+   ❌ web_search           → just tool_start/result
+
+4. Limits and timeouts
+   - MAX_TOOL_ROUNDS = 10
+   - LLM_TIMEOUT_MS = 120000 (120s)
+   - TOOL_TIMEOUT_MS = 30000 (30s)
+   - delegationCount <= 2
+
+
+KEY LINE NUMBERS
+────────────────
+
+115         POST /api/chat endpoint
+127-131     SSE headers setup
+133-135     sendSSE() function
+180         Call handleChat()
+549         handleChat() signature
+560-562     messages[] initialization
+564         MAX_TOOL_ROUNDS = 10
+567         for (let round = 0; ...)  ← MAIN LOOP START
+572-574     LLM call (provider-specific)
+478, 534    token event emission
+578-580     if (toolCalls.length === 0) return
+583-587     messages.push(rawAssistant)
+590-604     Tool execution loop
+602         runTool() call
+607-616     messages.push(toolResults)
+618         } (loop end)
+620-633     max rounds fallback
+182-189     Wrap-up (quick replies + done)
+
+
+MESSAGES[] ARRAY EVOLUTION
+──────────────────────────
+
+Round 0 (initial):
+  [{role: "system", ...}, {role: "user", ...}]
+
+After Round 1 (LLM calls tools):
+  [{role: "system", ...}, 
+   {role: "user", ...},
+   {role: "assistant", tool_calls: [...]},
+   {role: "tool", ...},  ← or content array for Anthropic
+   {role: "tool", ...}]
+
+After Round 2:
+  [{role: "system", ...},
+   {role: "user", ...},
+   {role: "assistant", tool_calls: [...]},
+   {role: "tool", ...},
+   {role: "assistant", tool_calls: [...]},  ← NEW
+   {role: "tool", ...},  ← NEW
+   {role: "tool", ...}]  ← NEW
+
+After Round N (LLM no tool calls):
+  [... (all previous) ...] ← RETURN fullText
+
+
+PROVIDER DIFFERENCES
+───────────────────
+
+OpenAI:
+  - system prompt in messages array
+  - tool_calls in assistant message
+  - tool results: one message per tool
+
+Anthropic:
+  - system prompt separate parameter
+  - tool_use in content array
+  - tool results: single message with array
+
+But same loop logic for both!
+
+
+DEBUGGING CHECKLIST
+───────────────────
+
+□ Not seeing round 2?
+  → Check for token events ending, then tool_start
+  → No explicit round event exists
+
+□ Tool result not cached?
+  → Only rate/weather/trip have special events
+  → Other tools: check tool_result event instead
+
+□ LLM stuck?
+  → Check 120s timeout (LLM_TIMEOUT_MS)
+  → Check tool 30s timeout (TOOL_TIMEOUT_MS)
+  → Max 10 rounds per request
+
+□ Delegation not working?
+  → Max 2 delegations per request (line 594)
+  → delegationCount tracked (line 565)
+
+□ TripBook not syncing?
+  → Save _snapshot from tripbook_update event
+  → Pass tripBookSnapshot in next request
+
+
+═══════════════════════════════════════════════════════════════════════════════
+For details: See QUICK_SUMMARY.md or SERVER_FLOW_ANALYSIS.md

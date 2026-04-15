@@ -19,6 +19,8 @@
  */
 
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 
 // ─── 日志级别 ───
 const LEVELS = {
@@ -35,6 +37,44 @@ const currentLevel = LEVELS[ENV_LEVEL] ?? LEVELS.INFO;
 
 // 是否输出 JSON 格式（生产环境推荐），默认 false 使用可读格式
 const JSON_FORMAT = process.env.LOG_JSON === 'true';
+
+// 是否输出到终端（由 LOG_STDOUT 环境变量控制，默认 true）
+const LOG_STDOUT = process.env.LOG_STDOUT !== 'false';
+
+// ─── 日志文件 ───
+const LOG_DIR = path.join(process.cwd(), 'logs');
+let logFileStream = null;
+let errFileStream = null;
+
+function initLogFiles() {
+  try {
+    fs.mkdirSync(LOG_DIR, { recursive: true });
+    const dateStr = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    logFileStream = fs.createWriteStream(path.join(LOG_DIR, `app-${dateStr}.log`), { flags: 'a' });
+    errFileStream = fs.createWriteStream(path.join(LOG_DIR, `error-${dateStr}.log`), { flags: 'a' });
+
+    // 清理 7 天前的日志文件
+    cleanOldLogs();
+  } catch (err) {
+    console.error('Failed to initialize log files:', err.message);
+  }
+}
+
+function cleanOldLogs() {
+  try {
+    const files = fs.readdirSync(LOG_DIR);
+    const cutoff = Date.now() - 7 * 24 * 3600 * 1000;
+    for (const f of files) {
+      const fp = path.join(LOG_DIR, f);
+      const stat = fs.statSync(fp);
+      if (stat.mtimeMs < cutoff) {
+        fs.unlinkSync(fp);
+      }
+    }
+  } catch {}
+}
+
+initLogFiles();
 
 // ─── 颜色代码（终端可读格式用） ───
 const COLORS = {
@@ -86,8 +126,48 @@ function writeLog(level, context, message, data) {
 
   const timestamp = new Date().toISOString();
 
+  // 构建上下文标签（终端和文件共用）
+  const tags = [];
+  if (context.reqId) tags.push(`req:${context.reqId}`);
+  if (context.agent) tags.push(`agent:${context.agent}`);
+  if (context.tool) tags.push(`tool:${context.tool}`);
+  const tagStr = tags.length > 0 ? `[${tags.join(' ')}] ` : '';
+
+  // 构建数据部分
+  let dataStr = '';
+  if (data && Object.keys(data).length > 0) {
+    const parts = [];
+    for (const [k, v] of Object.entries(data)) {
+      if (v === undefined || v === null) continue;
+      if (typeof v === 'string' && v.length > 200) {
+        parts.push(`${k}=${truncate(v)}`);
+      } else if (typeof v === 'object') {
+        parts.push(`${k}=${JSON.stringify(v)}`);
+      } else {
+        parts.push(`${k}=${v}`);
+      }
+    }
+    if (parts.length > 0) dataStr = ' | ' + parts.join(', ');
+  }
+
+  const timeStr = timestamp.slice(11, 23); // HH:MM:SS.mmm
+
+  // ── 写入日志文件（始终执行） ──
+  const fileLine = `${timestamp} ${level.padEnd(5)} ${tagStr}${message}${dataStr}\n`;
+  try {
+    if (level === 'ERROR' && errFileStream) {
+      errFileStream.write(fileLine);
+    }
+    // 所有级别都写入 app 日志
+    if (logFileStream) {
+      logFileStream.write(fileLine);
+    }
+  } catch {}
+
+  // ── 写入终端（受 LOG_STDOUT 控制） ──
+  if (!LOG_STDOUT) return;
+
   if (JSON_FORMAT) {
-    // 结构化 JSON 输出
     const entry = {
       ts: timestamp,
       level,
@@ -98,38 +178,10 @@ function writeLog(level, context, message, data) {
     const stream = level === 'ERROR' ? process.stderr : process.stdout;
     stream.write(JSON.stringify(entry) + '\n');
   } else {
-    // 可读格式
     const color = COLORS[level] || '';
     const icon = ICONS[level] || '';
     const reset = COLORS.RESET;
-
-    // 构建上下文标签
-    const tags = [];
-    if (context.reqId) tags.push(`req:${context.reqId}`);
-    if (context.agent) tags.push(`agent:${context.agent}`);
-    if (context.tool) tags.push(`tool:${context.tool}`);
-    const tagStr = tags.length > 0 ? `[${tags.join(' ')}] ` : '';
-
-    // 构建数据部分
-    let dataStr = '';
-    if (data && Object.keys(data).length > 0) {
-      const parts = [];
-      for (const [k, v] of Object.entries(data)) {
-        if (v === undefined || v === null) continue;
-        if (typeof v === 'string' && v.length > 200) {
-          parts.push(`${k}=${truncate(v)}`);
-        } else if (typeof v === 'object') {
-          parts.push(`${k}=${JSON.stringify(v)}`);
-        } else {
-          parts.push(`${k}=${v}`);
-        }
-      }
-      if (parts.length > 0) dataStr = ' | ' + parts.join(', ');
-    }
-
-    const timeStr = timestamp.slice(11, 23); // HH:MM:SS.mmm
     const line = `${color}${timeStr} ${icon} ${level.padEnd(5)}${reset} ${tagStr}${message}${dataStr}`;
-
     const stream = level === 'ERROR' ? process.stderr : process.stdout;
     stream.write(line + '\n');
   }

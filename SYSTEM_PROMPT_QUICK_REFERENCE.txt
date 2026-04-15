@@ -1,0 +1,175 @@
+╔════════════════════════════════════════════════════════════════════════════════╗
+║           MAIN AGENT SYSTEM PROMPT CONTEXT — QUICK REFERENCE                  ║
+╚════════════════════════════════════════════════════════════════════════════════╝
+
+═══════════════════════════════════════════════════════════════════════════════════
+
+1️⃣  toSystemPromptSection() OUTPUT STRUCTURE
+   ├─ Header: "# 行程参考书"
+   ├─ buildDynamicDataPromptSection() — 3 subsections (if data exists):
+   │  ├─ 已缓存天气 (with age + TTL remaining)
+   │  ├─ 已缓存汇率
+   │  └─ 已完成的搜索 (to prevent duplicate searches)
+   │
+   ├─ buildConstraintsPromptSection() — 2 sections:
+   │  ├─ ## 用户已确认信息（勿重复询问）✅
+   │  └─ ## 待确认信息 ❓
+   │
+   └─ buildItineraryPromptSection() — if phase > 0:
+      ├─ 阶段 N/7: Label
+      ├─ 路线: city → city → city
+      ├─ 已选机票/酒店摘要
+      └─ 预算使用: ¥X / ¥Y
+
+   🔑 CRITICAL: confirmed flag defaults to TRUE when omitted (prevents re-asking!)
+
+═══════════════════════════════════════════════════════════════════════════════════
+
+2️⃣  AVAILABLE AGENTS (agents/config.js)
+
+   ┌──────────┬──────────────────────────┬────────┬──────┐
+   │ Agent    │ Tools                    │ Label  │ Icon │
+   ├──────────┼──────────────────────────┼────────┼──────┤
+   │ flight   │ search_flights           │ 机票搜索 │ ✈️   │
+   │          │ get_exchange_rate        │        │      │
+   └──────────┴──────────────────────────┴────────┴──────┘
+
+   ⚠️  ONLY ONE AGENT! No hotel/attraction/poi agents available.
+   delegate_to_agents enum = ["flight"] only
+
+═══════════════════════════════════════════════════════════════════════════════════
+
+3️⃣  HOLIDAY KNOWLEDGE (prompts/knowledge/holidays.js)
+
+   📊 File Size:    77 lines, 3,321 bytes (~900 tokens)
+   📋 Content:      2025/2026 Chinese holiday tables + daily breakdowns
+   ⚠️  STATUS:      ❌ NOT INJECTED into system prompt
+                   (Dead code: exported but never imported/used)
+
+═══════════════════════════════════════════════════════════════════════════════════
+
+4️⃣  AVAILABLE TOOLS (tools/index.js)
+
+   Direct Tools (ALL_TOOLS array):
+   ┌─────────────────────────┬──────────────────────────────────────┐
+   │ web_search              │ Bing search (with retry + rate limit) │
+   │ get_weather             │ Open-Meteo (max 16 days future)      │
+   │ get_exchange_rate       │ Cached; 4-hour TTL                   │
+   │ search_poi              │ Google Maps (restaurants/attractions) │
+   │ search_flights          │ Usually via delegate_to_agents       │
+   │ search_hotels           │ Hotel search                         │
+   │ cache_destination_knowledge │ Two-tier (country/city) storage  │
+   │ update_trip_info        │ TripBook writer (incremental)        │
+   └─────────────────────────┴──────────────────────────────────────┘
+
+   Delegation Tool (NOT in ALL_TOOLS):
+   ┌─────────────────────────────────────────────────────────────────┐
+   │ delegate_to_agents                                              │
+   │ ├─ Format: { tasks: [{agent:"flight", task:"description"}] }  │
+   │ ├─ Results capped: 4,000 chars per agent                       │
+   │ ├─ Timeout: 120s per agent                                     │
+   │ └─ Execution: Via executeDelegation() in agents/delegate.js     │
+   └─────────────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════════════════════════
+
+5️⃣  TRIPBOOK THREE-LAYER ARCHITECTURE
+
+   Layer 1: DynamicData (realtime caches)
+   ├─ knowledge{}       → destination keys (TTL-based)
+   ├─ weather{}         → {current, forecast, _meta}
+   ├─ exchangeRates{}   → {from/to pair → rate}
+   ├─ flightQuotes[]    → [{id, airline, price_cny/usd, status}]
+   ├─ hotelQuotes[]     → [{id, name, price, checkin/checkout, status}]
+   └─ webSearches[]     → [{query, summary, fetched_at}]
+
+   Layer 2: UserConstraints (user-confirmed parameters)
+   ├─ destination       → {value, cities[], confirmed ✅}
+   ├─ departCity        → {value, airports[], confirmed ✅}
+   ├─ dates             → {start, end, days, flexible, confirmed ✅}
+   ├─ people            → {count, details, confirmed ✅}
+   ├─ budget            → {value, per_person, currency, confirmed ✅}
+   ├─ preferences       → {tags[], notes, confirmed ✅}
+   ├─ specialRequests[] → [{type, value, confirmed}]
+   └─ _history[]        → audit trail
+
+   Layer 3: Itinerary (structured trip plan)
+   ├─ phase             → 0-7 (8 phases total, auto-labeled)
+   ├─ route[]           → ["city1", "city2", "city3"]
+   ├─ days[]            → [{day, date, city, title, segments[]}]
+   ├─ budgetSummary     → {flights, hotels, meals, total_cny, budget_cny}
+   ├─ reminders[]       → pre-departure checklist
+   └─ practicalInfo[]   → [{category, content, icon}]
+
+═══════════════════════════════════════════════════════════════════════════════════
+
+6️⃣  SYSTEM PROMPT ASSEMBLY FLOW (server.js line 178)
+
+   Inputs:
+   • conversationText  → parsed from messages[]
+   • knownRates[]      → cached exchange rates
+   • knownWeather[]    → cached weather results
+   • tripBook          → TripBook instance
+
+   buildSystemPrompt() outputs:
+   ┌─────────────────────────────────────────────────────────────┐
+   │ 1. Current time (YYYY年MM月DD日 HH:MM, UTC+8)              │
+   │ 2. Role definition + behavioral guidelines                  │
+   │ 3. Progressive planning methodology (phases 1-4)           │
+   │ 4. Tool usage strategy (detailed for each tool)             │
+   │ 5. Cached destination knowledge (if mentioned in convo)    │
+   │ 6. TripBook section (via toSystemPromptSection())          │
+   └─────────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════════════════════════
+
+7️⃣  SEGMENT TYPES (for itinerary days[] → segments[])
+
+   transport       → 飞机/火车/地铁/出租/步行等
+   attraction      → 景点游览
+   activity        → 潜水/SPA/烹饪课等
+   meal            → 早/午/晚餐
+   hotel           → 入住/退房
+   flight          → 起飞/降落
+
+═══════════════════════════════════════════════════════════════════════════════════
+
+8️⃣  CACHE TTL SETTINGS
+
+   Weather:         3 hours (3 * 3600000 ms)
+   Exchange rates:  4 hours (4 * 3600000 ms)
+   Web searches:    No TTL (de-duplicated by query)
+   Destination KB:  Per-session cache (no auto-expiry)
+
+═══════════════════════════════════════════════════════════════════════════════════
+
+9️⃣  CRITICAL BEHAVIORS
+
+   ✅ confirmed flag defaults to TRUE (prevents re-asking if omitted)
+   ✅ Weather cache shows: "45分钟前查询，15分钟后过期"
+   ✅ Only 'selected' quotes appear in TripBook section (not 'quoted')
+   ✅ Sub-agent results capped at 4,000 chars
+   ✅ Holidays.js is UNUSED (must use web_search for holiday info)
+   ✅ Flight agent has ONLY search_flights + get_exchange_rate
+   ✅ Main agent has all 8 tools + delegate_to_agents
+
+═══════════════════════════════════════════════════════════════════════════════════
+
+🔟 TOOL INVOCATION PATHS
+
+   For Flight Searches:
+   Main Agent → delegate_to_agents({tasks:[{agent:"flight", task:"..."}]})
+                       ↓
+                   Flight Agent
+                       ├─ search_flights (multiple queries)
+                       └─ get_exchange_rate (for pricing)
+                       ↓
+                   Return: {results:[{agent:"flight", status:"success", data:"..."}]}
+
+   For Everything Else:
+   Main Agent → web_search / get_weather / search_poi / search_hotels / 
+                cache_destination_knowledge / update_trip_info
+
+═══════════════════════════════════════════════════════════════════════════════════
+
+END OF QUICK REFERENCE

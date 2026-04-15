@@ -1,23 +1,20 @@
 /**
  * TripBook — 行程参考书
  *
- * 一次行程规划会话的 single source of truth，分 4 层管理数据：
- *   Layer 1: 静态知识 (StaticKnowledge) — 国家/目的地背景，跨行程复用（按 key 引用）
- *   Layer 2: 动态数据 (DynamicData)     — 天气/汇率/机票酒店报价，带 TTL
- *   Layer 3: 用户约束 (UserConstraints) — 用户确认的需求参数
- *   Layer 4: 结构化行程 (Itinerary)     — AI 逐步构建的行程方案
+ * 一次行程规划会话的 single source of truth，分 3 层管理数据：
+ *   Layer 1: 动态数据 (DynamicData)     — 报价/搜索缓存
+ *   Layer 2: 用户约束 (UserConstraints) — 用户确认的需求参数
+ *   Layer 3: 结构化行程 (Itinerary)     — AI 逐步构建的行程方案
  */
 
 const PHASE_LABELS = [
   '',            // 0 — 未开始
-  '锁定约束',    // 1
-  '大交通确认',  // 2
-  '行程规划',    // 3（含住宿确认子流程）
-  '每日详情',    // 4
-  '行程总结',    // 5（含预算汇总）
+  '了解需求',    // 1 — 了解用户需求 + 锁定硬性约束
+  '规划框架',    // 2 — 大交通 + 行程框架
+  '完善详情',    // 3 — 填充景点/餐饮/住宿
+  '行程总结',    // 4 — 预算汇总
 ];
 
-// ── 计数器，用于生成报价 ID ──
 let quoteCounter = 0;
 
 class TripBook {
@@ -25,20 +22,14 @@ class TripBook {
     this.id = id || `trip_${Date.now()}`;
     this.created_at = Date.now();
 
-    // Layer 1: 引用静态知识（不拷贝，存 key 列表）
-    this.knowledgeRefs = [];   // ["日本", "泰国"]
-    this.activityRefs = [];    // ["潜水"]
-
-    // Layer 2: 动态数据
+    // Layer 1: 动态数据
     this.dynamic = {
-      weather: {},          // { "tokyo": { city, current, forecast, _meta } }
-      exchangeRates: {},    // { "JPY_CNY": { from, to, rate, last_updated, _meta } }
       flightQuotes: [],     // [{ id, route, date, airline, price_usd, price_cny, ... }]
       hotelQuotes: [],      // [{ id, name, city, checkin, checkout, ... }]
       webSearches: [],      // [{ query, summary, fetched_at }]
     };
 
-    // Layer 3: 用户约束
+    // Layer 2: 用户约束
     this.constraints = {
       destination:   null,  // { value, cities[], confirmed, confirmed_at }
       departCity:    null,  // { value, airports[], confirmed, confirmed_at }
@@ -47,51 +38,22 @@ class TripBook {
       budget:        null,  // { value, per_person, currency, confirmed, confirmed_at }
       preferences:   null,  // { tags[], notes, confirmed, confirmed_at }
       specialRequests: [],  // [{ type, value, confirmed }]
-      _history: [],         // [{ field, from, to, changed_at, reason }]
     };
 
-    // Layer 4: 结构化行程
+    // Layer 3: 结构化行程
     this.itinerary = {
       phase: 0,
       phaseLabel: '',
       route: [],            // ["东京", "京都", "大阪"]
       days: [],             // [{ day, date, city, title, segments[] }]
       budgetSummary: null,  // { flights, hotels, ..., total_cny, budget_cny, remaining_cny }
-      reminders: [],        // ["出发前3天完成Visit Japan Web注册", ...]
     };
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // Layer 1: 静态知识引用
+  // Layer 1: 动态数据
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  addKnowledgeRef(key) {
-    if (key && !this.knowledgeRefs.includes(key)) {
-      this.knowledgeRefs.push(key);
-    }
-  }
-
-  addActivityRef(key) {
-    if (key && !this.activityRefs.includes(key)) {
-      this.activityRefs.push(key);
-    }
-  }
-
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // Layer 2: 动态数据
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  /** 记录天气查询结果（从 weather.js 缓存同步） */
-  setWeather(cityKey, data) {
-    this.dynamic.weather[cityKey.toLowerCase()] = data;
-  }
-
-  /** 记录汇率查询结果（从 exchange-rate.js 缓存同步） */
-  setExchangeRate(key, data) {
-    this.dynamic.exchangeRates[key] = data;
-  }
-
-  /** 添加机票报价快照 */
   addFlightQuote(quote) {
     const id = `f${++quoteCounter}`;
     const entry = { id, status: 'quoted', queried_at: Date.now(), ...quote };
@@ -99,7 +61,6 @@ class TripBook {
     return id;
   }
 
-  /** 添加酒店报价快照 */
   addHotelQuote(quote) {
     const id = `h${++quoteCounter}`;
     const entry = { id, status: 'quoted', queried_at: Date.now(), ...quote };
@@ -107,7 +68,7 @@ class TripBook {
     return id;
   }
 
-  /** 记录 web_search 查询（按 query 去重，避免 LLM 重复搜索相同主题） */
+  /** 记录 web_search 查询（按 query 去重） */
   addWebSearch(entry) {
     const key = (entry.query || '').toLowerCase().trim();
     if (!key) return;
@@ -122,7 +83,6 @@ class TripBook {
     }
   }
 
-  /** 更新报价状态（quoted → selected → booked） */
   updateQuoteStatus(quoteId, status) {
     const allQuotes = [...this.dynamic.flightQuotes, ...this.dynamic.hotelQuotes];
     const q = allQuotes.find(x => x.id === quoteId);
@@ -130,13 +90,9 @@ class TripBook {
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // Layer 3: 用户约束
+  // Layer 2: 用户约束
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  /**
-   * 增量更新约束 — AI 调用 update_trip_info 时传入 constraints 对象
-   * @param {Object} delta — 与 this.constraints 相同结构的子集
-   */
   updateConstraints(delta) {
     if (!delta) return;
     const now = Date.now();
@@ -146,31 +102,18 @@ class TripBook {
       if (delta[field] !== undefined) {
         const oldVal = this.constraints[field];
         const newVal = { ...delta[field] };
-        
-        // ⚠️  CRITICAL: Ensure confirmed flag is set when LLM provides constraint data
-        // When AI calls update_trip_info with confirmed: true, set confirmed_at timestamp
-        // If confirmed flag is missing/undefined, default to true (assuming AI confirmation means commitment)
-        // If explicitly false, preserve it (for pending/tentative constraints)
+
         if (newVal.confirmed === undefined) {
-          newVal.confirmed = true; // Default: treat new constraints as confirmed
+          newVal.confirmed = true;
         }
         if (newVal.confirmed && !newVal.confirmed_at) {
           newVal.confirmed_at = now;
         }
-        // 记录变更历史
-        if (oldVal && oldVal.value !== undefined && newVal.value !== undefined && oldVal.value !== newVal.value) {
-          this.constraints._history.push({
-            field, from: oldVal.value, to: newVal.value,
-            changed_at: now, reason: newVal._reason || '用户修改',
-          });
-        }
         delete newVal._reason;
-        // 浅合并：保留旧有子字段，用新值覆盖（避免部分更新导致丢字段）
         this.constraints[field] = oldVal ? { ...oldVal, ...newVal } : newVal;
       }
     }
 
-    // 特殊需求（追加模式）
     if (Array.isArray(delta.specialRequests)) {
       for (const req of delta.specialRequests) {
         const existing = this.constraints.specialRequests.find(
@@ -186,23 +129,16 @@ class TripBook {
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // Layer 4: 结构化行程
+  // Layer 3: 结构化行程
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  /**
-   * 更新行程阶段
-   */
   updatePhase(phase) {
-    if (typeof phase === 'number' && phase >= 0 && phase <= 7) {
+    if (typeof phase === 'number' && phase >= 0 && phase <= 4) {
       this.itinerary.phase = phase;
       this.itinerary.phaseLabel = PHASE_LABELS[phase] || '';
     }
   }
 
-  /**
-   * 增量更新行程数据
-   * @param {Object} delta — { route?, days?, budgetSummary?, reminders? }
-   */
   updateItinerary(delta) {
     if (!delta) return;
 
@@ -215,33 +151,47 @@ class TripBook {
     }
 
     if (Array.isArray(delta.days)) {
-      // 合并策略：按 day 编号覆盖，但保留已有 segments（除非新数据明确提供了非空 segments）
       for (const newDay of delta.days) {
         const idx = this.itinerary.days.findIndex(d => d.day === newDay.day);
         if (idx >= 0) {
           const existing = this.itinerary.days[idx];
-          // 如果新数据的 segments 为空数组或未提供，保留已有 segments
           const merged = { ...existing, ...newDay };
-          if (existing.segments?.length > 0 && (!newDay.segments || newDay.segments.length === 0)) {
-            merged.segments = existing.segments;
+
+          // segments 智能合并：
+          // 1. 新数据没传 segments 或传了空数组 → 保留原有 segments
+          // 2. 新数据传了 segments 且设置了 _replace: true → 完全替换
+          // 3. 新数据传了 segments（非空）→ 按 time+title 去重合并
+          if (!newDay.segments || newDay.segments.length === 0) {
+            merged.segments = existing.segments || [];
+          } else if (newDay._replace) {
+            merged.segments = newDay.segments;
+          } else if (existing.segments?.length > 0) {
+            // 去重合并：用 time+title 作为唯一标识
+            const existingMap = new Map();
+            for (const seg of existing.segments) {
+              const key = `${seg.time || ''}|${seg.title || seg.activity || ''}`;
+              existingMap.set(key, seg);
+            }
+            for (const seg of newDay.segments) {
+              const key = `${seg.time || ''}|${seg.title || seg.activity || ''}`;
+              existingMap.set(key, { ...(existingMap.get(key) || {}), ...seg });
+            }
+            merged.segments = Array.from(existingMap.values())
+              .sort((a, b) => (a.time || '').localeCompare(b.time || ''));
           }
+          delete merged._replace;
           this.itinerary.days[idx] = merged;
         } else {
-          this.itinerary.days.push(newDay);
+          const cleaned = { ...newDay };
+          delete cleaned._replace;
+          this.itinerary.days.push(cleaned);
         }
       }
-      // 按 day 编号排序
       this.itinerary.days.sort((a, b) => a.day - b.day);
     }
 
     if (delta.budgetSummary) {
       this.itinerary.budgetSummary = { ...this.itinerary.budgetSummary, ...delta.budgetSummary };
-    }
-
-    if (Array.isArray(delta.reminders)) {
-      const existing = new Set(this.itinerary.reminders);
-      delta.reminders.forEach(r => existing.add(r));
-      this.itinerary.reminders = Array.from(existing);
     }
   }
 
@@ -249,51 +199,6 @@ class TripBook {
   // 系统提示注入
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  /**
-   * 生成"已确认用户约束"文本，注入系统提示告知 AI 不要重复询问
-   */
-  /**
-   * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   * buildConstraintsPromptSection() - 系统提示约束注入
-   * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   * 
-   * 这个方法是 TripBook → 系统提示注入的关键链接。
-   * 
-   * SPLIT LOGIC (第 257/263/272/277/285/291 行):
-   *   const confirmed = [];  // 已确认信息（constraint.confirmed === true）
-   *   const pending = [];    // 待确认信息（constraint.confirmed !== true）
-   * 
-   *   if (constraint.confirmed) {
-   *     confirmed.push(`${label} ✅`);
-   *   } else {
-   *     pending.push(`${label} ❓`);
-   *   }
-   * 
-   * OUTPUT FORMAT (第 300-305 行):
-   *   ## 用户已确认信息（勿重复询问）
-   *   - 目的地：日本 ✅
-   *   - 出发城市：北京 ✅
-   *   - 日期：2026-05-01 ~ 2026-05-07（7天）✅
-   *   
-   *   ## 待确认信息
-   *   - 预算：❓
-   * 
-   * CRITICAL DEPENDENCY:
-   *   如果 constraint.confirmed === undefined，会进入 pending 列表
-   *   system-prompt.js line 66: "严禁重复询问" 规则对应已确认信息
-   *   如果已确认列表为空 → 规则无法生效 → AI 重新提问
-   * 
-   * FIX (models/trip-book.js line 154-156):
-   *   if (newVal.confirmed === undefined) {
-   *     newVal.confirmed = true;  // 默认设为已确认
-   *   }
-   * 
-   * DEBUGGING:
-   *   1. 检查约束对象的 confirmed 字段值：true/false/undefined
-   *   2. 查看系统提示是否包含"用户已确认信息"部分
-   *   3. 如果信息在 confirmed 但系统提示中仍然缺失，说明恢复失败
-   * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   */
   buildConstraintsPromptSection() {
     const c = this.constraints;
     const confirmed = [];
@@ -349,27 +254,23 @@ class TripBook {
       parts.push(`## 用户已确认信息（勿重复询问）\n${confirmed.map(l => `- ${l} ✅`).join('\n')}`);
     }
     if (pending.length > 0) {
-      parts.push(`## 待确认信息\n${pending.map(l => `- ${l} ❓`).join('\n')}`);
+      parts.push(`## 暂按假设推进的信息（用户未明确，已做合理假设，无需追问，用户主动调整时再更新）\n${pending.map(l => `- ${l} ⏳`).join('\n')}`);
     }
     return parts.join('\n\n');
   }
 
-  /**
-   * 生成"当前行程进度"文本
-   */
   buildItineraryPromptSection() {
     const it = this.itinerary;
     if (it.phase === 0) return '';
 
     const parts = [];
     parts.push(`## 当前行程进度`);
-    parts.push(`阶段 ${it.phase}/7: ${it.phaseLabel}`);
+    parts.push(`阶段 ${it.phase}/4: ${it.phaseLabel}`);
 
     if (it.route.length > 0) {
       parts.push(`路线: ${it.route.join(' → ')}`);
     }
 
-    // 已选择的机票/酒店
     const selectedFlights = this.dynamic.flightQuotes.filter(f => f.status === 'selected');
     for (const f of selectedFlights) {
       const price = f.price_cny ? `¥${f.price_cny}` : `$${f.price_usd}`;
@@ -381,53 +282,34 @@ class TripBook {
       parts.push(`已选酒店: ${h.name} ${h.city} ${price}`);
     }
 
-    // 预算摘要
     if (it.budgetSummary && it.budgetSummary.total_cny) {
       parts.push(`预算使用: ¥${it.budgetSummary.total_cny} / ¥${it.budgetSummary.budget_cny || '?'}`);
+    }
+
+    // 注入每日行程摘要（让 LLM 知道已有行程，变更时不会丢失）
+    if (it.days.length > 0) {
+      parts.push('');
+      parts.push('## 已有每日行程（变更时只传需修改的天数，未提及的天保持不变）');
+      for (const day of it.days) {
+        const segs = day.segments || [];
+        if (segs.length === 0) {
+          parts.push(`- Day ${day.day}（${day.date || ''}）${day.city || ''} — ${day.title || '待安排'}`);
+        } else {
+          const segSummary = segs.map(s => {
+            const time = s.time ? `${s.time} ` : '';
+            return `${time}${s.title || s.activity || ''}`;
+          }).join(' → ');
+          parts.push(`- Day ${day.day}（${day.date || ''}）${day.city || ''} — ${day.title || ''}: ${segSummary}`);
+        }
+      }
     }
 
     return parts.join('\n');
   }
 
-  /**
-   * 生成动态数据缓存提示（天气、汇率）
-   */
-  buildDynamicDataPromptSection() {
-    const parts = [];
+  /** 生成已完成搜索的提示（避免 LLM 重复搜索） */
+  buildSearchCachePromptSection() {
     const now = Date.now();
-
-    // 天气
-    const weatherLines = [];
-    for (const [, w] of Object.entries(this.dynamic.weather)) {
-      if (w._meta && w._meta.fetched_at) {
-        const age = Math.round((now - w._meta.fetched_at) / 60000);
-        const ttl = Math.round((w._meta.ttl || 3 * 3600000) / 60000);
-        if (age < ttl) {
-          const desc = w.current?.description ? `，${w.current.description}` : '';
-          weatherLines.push(`- ${w.city}: ${w.current?.temp_c || '?'}°C${desc}（${age}分钟前查询，${ttl - age}分钟后过期）`);
-        }
-      }
-    }
-    if (weatherLines.length > 0) {
-      parts.push(`### 已缓存天气（勿重复调用 get_weather）\n${weatherLines.join('\n')}`);
-    }
-
-    // 汇率
-    const rateLines = [];
-    for (const [, r] of Object.entries(this.dynamic.exchangeRates)) {
-      if (r._meta && r._meta.fetched_at) {
-        const age = Math.round((now - r._meta.fetched_at) / 60000);
-        const ttl = Math.round((r._meta.ttl || 4 * 3600000) / 60000);
-        if (age < ttl) {
-          rateLines.push(`- 1 ${r.from} = ${r.rate} ${r.to}（${age}分钟前查询）`);
-        }
-      }
-    }
-    if (rateLines.length > 0) {
-      parts.push(`### 已缓存汇率（勿重复调用 get_exchange_rate）\n${rateLines.join('\n')}`);
-    }
-
-    // 已完成的搜索
     const searchLines = [];
     for (const s of this.dynamic.webSearches) {
       const age = Math.round((now - s.fetched_at) / 60000);
@@ -435,32 +317,24 @@ class TripBook {
       searchLines.push(`- "${s.query}" → ${summary}（${age}分钟前）`);
     }
     if (searchLines.length > 0) {
-      parts.push(`### 已完成的搜索（勿重复搜索相同或相似主题）\n以下主题已通过 web_search 查询过，请直接使用对话中的结果，不要再次搜索相同或高度相似的内容：\n${searchLines.join('\n')}`);
+      return `## 已完成的搜索（勿重复搜索相同或相似主题）\n以下主题已通过 web_search 查询过，请直接使用对话中的结果：\n${searchLines.join('\n')}`;
     }
-
-    return parts.length > 0 ? `## 已缓存动态数据\n${parts.join('\n\n')}` : '';
+    return '';
   }
 
-  /**
-   * 生成完整的 TripBook 系统提示注入段
-   */
   toSystemPromptSection() {
     const sections = [];
     sections.push('# 行程参考书');
 
-    // 动态数据
-    const dynamicSection = this.buildDynamicDataPromptSection();
-    if (dynamicSection) sections.push(dynamicSection);
+    const searchSection = this.buildSearchCachePromptSection();
+    if (searchSection) sections.push(searchSection);
 
-    // 用户约束
     const constraintsSection = this.buildConstraintsPromptSection();
     if (constraintsSection) sections.push(constraintsSection);
 
-    // 行程进度
     const itinerarySection = this.buildItineraryPromptSection();
     if (itinerarySection) sections.push(itinerarySection);
 
-    // 如果只有标题，说明还没开始
     if (sections.length === 1) {
       sections.push('（尚未开始规划，等待用户输入）');
     }
@@ -472,16 +346,11 @@ class TripBook {
   // 面板数据导出
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  /**
-   * 导出供前端面板渲染的扁平数据
-   * 保持与现有 itineraryState 兼容的字段名
-   */
   toPanelData() {
     const c = this.constraints;
     const it = this.itinerary;
 
     const dest = c.destination;
-    // 目的地字符串：如果 value 已包含城市信息（有括号），不再重复拼接 cities
     let destStr = '';
     if (dest) {
       const base = dest.value || '';
@@ -491,14 +360,6 @@ class TripBook {
         destStr = base;
       }
     }
-
-    // 所有目的地天气
-    const weatherEntries = Object.values(this.dynamic.weather);
-    const weatherList = weatherEntries.map(w => ({
-      city: w.city,
-      temp_c: w.current?.temp_c,
-      description: w.current?.description,
-    }));
 
     return {
       destination: destStr,
@@ -523,8 +384,6 @@ class TripBook {
           price: h.price_total_cny ? `¥${h.price_total_cny}` : `$${h.price_per_night_usd}/晚`,
           nights: h.nights, status: h.status,
         })),
-      weather: weatherList.length === 1 ? weatherList[0] : null,  // 单城市保持向后兼容
-      weatherList: weatherList.length > 0 ? weatherList : null,   // 多城市天气列表
       budgetSummary: it.budgetSummary,
       daysPlan: it.days.map(d => ({
         day: d.day, date: d.date, city: d.city, title: d.title,
@@ -539,18 +398,6 @@ class TripBook {
           type: seg.type || 'activity',
         })),
       })),
-
-      // 行前准备 & 重要信息 Tab
-      reminders: it.reminders || [],
-      exchangeRates: Object.values(this.dynamic.exchangeRates).map(r => ({
-        from: r.from, to: r.to, rate: r.rate, last_updated: r.last_updated,
-      })),
-      webSearchSummaries: this.dynamic.webSearches.map(s => ({
-        query: s.query, summary: s.summary || '', fetched_at: s.fetched_at,
-      })),
-      specialRequests: (c.specialRequests || []).map(r => ({
-        type: r.type, value: r.value, confirmed: r.confirmed,
-      })),
     };
   }
 
@@ -562,8 +409,6 @@ class TripBook {
     return {
       id: this.id,
       created_at: this.created_at,
-      knowledgeRefs: this.knowledgeRefs,
-      activityRefs: this.activityRefs,
       dynamic: this.dynamic,
       constraints: this.constraints,
       itinerary: this.itinerary,
@@ -573,8 +418,6 @@ class TripBook {
   static fromJSON(json) {
     const tb = new TripBook(json.id);
     tb.created_at = json.created_at || Date.now();
-    tb.knowledgeRefs = json.knowledgeRefs || [];
-    tb.activityRefs = json.activityRefs || [];
     tb.dynamic = { ...tb.dynamic, ...json.dynamic };
     tb.constraints = { ...tb.constraints, ...json.constraints };
     tb.itinerary = { ...tb.itinerary, ...json.itinerary };

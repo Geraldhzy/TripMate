@@ -1,0 +1,339 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║                        AI TRAVEL PLANNER - REQUEST FLOW                    ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  CLIENT HTTP POST /api/chat                                                 │
+│  ├─ messages: [ {role, content}, ... ]                                      │
+│  ├─ provider: "openai" | "anthropic" | "deepseek"                           │
+│  ├─ model: string                                                            │
+│  └─ tripBookSnapshot: { constraints, itinerary, ... } [optional]            │
+└─────────────────────────────────────────────────────────────────────────────┘
+            │
+            ▼ Line 115-180: Setup Phase
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ POST /api/chat Handler                                                      │
+│ ├─ Initialize SSE (line 127-131)                                            │
+│ │  └─ Content-Type: text/event-stream                                       │
+│ │  └─ Connection: keep-alive                                                │
+│ ├─ Define sendSSE function (line 133-135)                                   │
+│ ├─ Create TripBook (line 139)                                               │
+│ ├─ Restore TripBook from snapshot (line 155-172)                            │
+│ ├─ Build system prompt (line 175)                                           │
+│ └─ Call handleChat() [MAIN LOOP ENTRY] (line 180)                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+            │
+            ▼ Line 549-634: handleChat() - THE MAIN LOOP
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ handleChat(provider, apiKey, model, systemPrompt, userMessages, ...)       │
+│                                                                              │
+│  Setup (line 550-567):                                                      │
+│  ├─ Determine provider (Anthropic vs OpenAI)                                │
+│  ├─ Initialize LLM client                                                   │
+│  ├─ Get tool definitions                                                    │
+│  ├─ Initialize messages[] array (line 560-562)                              │
+│  │  └─ For Anthropic: just userMessages                                     │
+│  │  └─ For OpenAI: [system message, ...userMessages]                        │
+│  ├─ Set MAX_TOOL_ROUNDS = 10 (line 564)                                     │
+│  └─ Set delegationCount = 0 (line 565)                                      │
+│                                                                              │
+│  MAIN LOOP (line 567-618):                                                  │
+│  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {                   │
+│                                                                              │
+│    ┌─ Round N Iteration ────────────────────────────────────────────────┐   │
+│    │                                                                    │   │
+│    │ 1. Log round (line 568)                                           │   │
+│    │    └─ "主Agent轮次 N+1/10"                                        │   │
+│    │                                                                    │   │
+│    │ 2. Call LLM (line 572-574)                                        │   │
+│    │    ├─ Provider-specific streaming:                                │   │
+│    │    │  ├─ streamOpenAI()  [line 451-517]                           │   │
+│    │    │  │  ├─ Create client.chat.completions.create() with stream   │   │
+│    │    │  │  ├─ Iterate chunks: extract delta.content → token SSE    │   │
+│    │    │  │  ├─ Accumulate delta.tool_calls                           │   │
+│    │    │  │  └─ Return {fullText, toolCalls, rawAssistant}            │   │
+│    │    │  │                                                           │   │
+│    │    │  └─ streamAnthropic()  [line 523-547]                        │   │
+│    │    │     ├─ Create client.messages.stream()                       │   │
+│    │    │     ├─ Hook stream.on('text') → token SSE                   │   │
+│    │    │     ├─ Wait stream.finalMessage()                            │   │
+│    │    │     ├─ Filter: tool_use → toolCalls, text → fullText        │   │
+│    │    │     └─ Return {fullText, toolCalls, rawAssistant}            │   │
+│    │    │                                                              │   │
+│    │    └─ SSE events during LLM call:                                 │   │
+│    │       └─ token event (line 478, 534)  [STREAMING REAL-TIME]      │   │
+│    │                                                                    │   │
+│    │ 3. Check tool calls (line 578-580)                                │   │
+│    │    IF (toolCalls.length === 0):                                   │   │
+│    │    └─ RETURN fullText [ROUND ENDS - EXIT LOOP]                    │   │
+│    │                                                                    │   │
+│    │ 4. Add assistant message (line 583-587)                           │   │
+│    │    └─ messages.push(rawAssistant)  [WITH TOOL_CALLS]              │   │
+│    │                                                                    │   │
+│    │ 5. Execute tools sequentially (line 590-604)                      │   │
+│    │    FOR EACH toolCall:                                             │   │
+│    │    │                                                              │   │
+│    │    ├─ Call runTool() (line 602)  [TOOL EXECUTION]                │   │
+│    │    │  │                                                           │   │
+│    │    │  └─ runTool() {  [line 253-399]                              │   │
+│    │    │     ├─ SSE: tool_start (line 259, 277)                       │   │
+│    │    │     ├─ Execute: executeToolCall()  [TIMEOUT: 30s]            │   │
+│    │    │     ├─ Sync to TripBook (line 294-383):                      │   │
+│    │    │     │  ├─ rate → SSE: rate_cached (line 300)                 │   │
+│    │    │     │  ├─ weather → SSE: weather_cached (line 310)           │   │
+│    │    │     │  ├─ flights/hotels → TripBook internal                 │   │
+│    │    │     │  ├─ trip_info → SSE: tripbook_update (line 373)        │   │
+│    │    │     │  └─ web_search → TripBook internal                     │   │
+│    │    │     ├─ SSE: tool_result (line 288, 390)                      │   │
+│    │    │     └─ RETURN: resultStr                                     │   │
+│    │    │     }                                                         │   │
+│    │    │                                                              │   │
+│    │    └─ Collect: toolResults.push({id, content})                    │   │
+│    │                                                                    │   │
+│    │ 6. Add tool results (line 607-616)                                │   │
+│    │    messages.push(toolResults)  [PROVIDER-SPECIFIC FORMAT]         │   │
+│    │    ├─ Anthropic: single message with array of tool_results        │   │
+│    │    └─ OpenAI: one message per tool result                         │   │
+│    │                                                                    │   │
+│    │ 7. Loop back → Next iteration (Round N+1)                         │   │
+│    │    └─ messages[] now has more content → LLM sees history           │   │
+│    │                                                                    │   │
+│    └────────────────────────────────────────────────────────────────────┘   │
+│                                                                              │
+│  Loop Exit Conditions:                                                      │
+│  ├─ toolCalls.length === 0 (line 578-580) [NORMAL EXIT]                    │
+│  │  └─ LLM decided final response, no more tools needed                    │
+│  │                                                                         │
+│  └─ round >= MAX_TOOL_ROUNDS (line 620-633) [FORCED EXIT]                  │
+│     ├─ Call LLM one more time WITHOUT tools (line 626-627)                 │
+│     ├─ Force final response to prevent infinite loops                      │
+│     └─ Return final response                                               │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+            │
+            │ Returns fullText (line 180)
+            ▼ Line 182-189: Wrap-up Phase
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Extract Quick Replies                                                       │
+│ ├─ Call extractQuickReplies(fullText) (line 183)                            │
+│ ├─ Regex search for numbered list: "1. XXX" / "1、XXX" / "1）XXX"           │
+│ ├─ Max 4 items, min 2 items, max 40 chars each                              │
+│ └─ IF found:                                                                │
+│    └─ SSE: quick_replies (line 185)                                        │
+│       { questions: [{label, value}, ...] }                                  │
+│                                                                              │
+│ Send Done Signal                                                            │
+│ └─ SSE: done (line 188) [TELLS CLIENT STREAM IS OVER]                      │
+│    {}                                                                        │
+│                                                                              │
+│ Log Metrics                                                                 │
+│ └─ reqTimer.done() (line 189)                                               │
+│    { provider, model, responseLen }                                         │
+│                                                                              │
+│ Return from endpoint handler (line 200): res.end()                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+            │
+            ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Client Receives SSE Stream                                                   │
+│                                                                              │
+│  Typical event sequence:                                                    │
+│  ├─ token: "我帮你..."                                                      │
+│  ├─ token: "查找机票"                                                        │
+│  ├─ tool_start: {name: "search_flights", ...}                              │
+│  ├─ tool_result: {name: "search_flights", resultLabel: "找到 3 个航班"}     │
+│  ├─ token: "根据以上..."                                                    │
+│  ├─ token: "信息..."                                                        │
+│  ├─ quick_replies: {questions: [...]}  [OPTIONAL]                           │
+│  └─ done: {}  [END OF STREAM]                                               │
+│                                                                              │
+│  Client closes EventSource                                                  │
+│  Ready for next message                                                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║                         KEY DATA STRUCTURES                                ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+messages[] Array Evolution:
+─────────────────────────
+Initial State:
+  [ {role: "system", content: "..."}, {role: "user", content: "..."} ]
+
+After Round 1 - LLM calls tools:
+  [ ..., {role: "assistant", tool_calls: [...]}, {role: "tool", ...}, ... ]
+
+After Round 2 - LLM calls more tools:
+  [ ..., {role: "assistant", tool_calls: [...]}, {role: "tool", ...}, ... ]
+
+After Round N - LLM no tool calls:
+  [ ... ] → RETURN fullText
+
+Note: GROWS WITH EACH ROUND. LLM sees full history. No clearing.
+
+
+TripBook Object:
+──────────────
+{
+  constraints: { budget, duration, interests, ... },
+  itinerary: [ { date, activities: [...] }, ... ],
+  dynamic: {
+    exchangeRates: { "USD_CNY": {...} },
+    weather: { "Beijing": {...} },
+    flightQuotes: [ {...}, ... ],
+    hotelQuotes: [ {...}, ... ],
+    webSearches: [ {...}, ... ],
+    knowledgeRefs: ["Beijing", "Shanghai", ...],
+    phase: "details"
+  }
+}
+
+Synced to client in:
+  ├─ tripbook_update event → _snapshot field
+  └─ Passed back next request as tripBookSnapshot
+
+
+Tool Execution Stack:
+────────────────────
+runTool(funcName, funcArgs, toolId, sendSSE, tripBook, delegateCtx, reqLog)
+  ├─ SSE: tool_start
+  ├─ executeToolCall(funcName, funcArgs)
+  │  └─ (Actual tool logic in tools/ directory)
+  ├─ Parse result
+  ├─ Sync to TripBook
+  │  ├─ Emit: rate_cached (if exchange rate)
+  │  ├─ Emit: weather_cached (if weather)
+  │  └─ Emit: tripbook_update (if trip info)
+  ├─ SSE: tool_result
+  └─ Return: resultStr
+
+
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║                      CRITICAL DESIGN PATTERNS                             ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+1. IMPLICIT ROUND SIGNALING
+   ──────────────────────
+   No explicit "round_start" or "round_end" event.
+   
+   Client infers from:
+   ├─ token events = LLM thinking/responding
+   ├─ tool_start → tool_result = tool execution phase
+   └─ Back to token = new LLM round after tool results
+   
+   Design benefit: Minimal SSE overhead, state from event flow
+
+
+2. MESSAGES ARRAY AS STATE MACHINE
+   ────────────────────────────────
+   Single source of truth: messages[] array
+   
+   ├─ Grows with each round
+   ├─ Never cleared
+   ├─ Contains full conversation history
+   ├─ LLM sees all context
+   └─ No external state management needed
+
+
+3. PROVIDER ABSTRACTION
+   ────────────────────
+   Same loop logic, different implementations:
+   
+   ├─ streamOpenAI() vs streamAnthropic()
+   │  └─ Different internal format → standardized output
+   ├─ Both return {fullText, toolCalls, rawAssistant}
+   ├─ Tool results formatted differently (lines 607-616)
+   │  ├─ Anthropic: single message with array
+   │  └─ OpenAI: one message per result
+   └─ Client never sees differences
+
+
+4. SELECTIVE TRIPBOOK SYNC
+   ──────────────────────
+   Not every tool result gets a special SSE event.
+   
+   ├─ rate_cached → exchange rates (line 300)
+   ├─ weather_cached → weather data (line 310)
+   ├─ tripbook_update → trip info (line 373)
+   └─ Others → tool_result only (client doesn't need cache)
+   
+   Design benefit: Clients can cache reusable data
+
+
+5. TIMEOUT PROTECTION
+   ──────────────────
+   withTimeout() wrapper (line 436-442)
+   
+   ├─ LLM timeout: 120s (LLM_TIMEOUT_MS) line 444
+   ├─ Tool timeout: 30s (TOOL_TIMEOUT_MS) line 445
+   ├─ Streaming timeout: per-round 120s
+   └─ Prevents hung requests
+
+
+6. DELEGATION LIMITS
+   ─────────────────
+   Prevents infinite delegation loops
+   
+   ├─ delegationCount tracks delegate_to_agents calls (line 565)
+   ├─ Max 2 per request (line 594)
+   ├─ Exceed limit → return error message
+   └─ Forces LLM to complete with existing info
+
+
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║                         EXACT LINE NUMBERS                                ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+/api/chat Endpoint Setup
+├─ 115: POST endpoint definition
+├─ 116: Extract request data
+├─ 127-131: SSE headers
+├─ 133-135: sendSSE function
+├─ 139: Create TripBook
+├─ 155-172: Restore TripBook from snapshot
+├─ 175: Build system prompt
+├─ 180: Call handleChat()
+├─ 182-189: Wrap-up phase (quick replies, done)
+├─ 190-201: Error handling
+└─ 200: res.end()
+
+handleChat() Main Loop
+├─ 549: Function signature
+├─ 560-562: messages[] initialization
+├─ 564: MAX_TOOL_ROUNDS = 10
+├─ 567: for (let round = 0; ...)
+├─ 572-574: Call LLM (provider-specific)
+├─ 578-580: if (toolCalls.length === 0) return fullText
+├─ 583-587: messages.push(rawAssistant)
+├─ 590-604: Execute tools loop
+├─ 602: Call runTool()
+├─ 607-616: messages.push(toolResults)
+├─ 618: } [end of for loop]
+├─ 620-633: MAX_TOOL_ROUNDS exceeded → final LLM call
+└─ 634: return finalText
+
+LLM Streaming
+├─ 451-517: streamOpenAI()
+│  ├─ 478: sendSSE('token')
+│  └─ 516: return {fullText, toolCalls, rawAssistant}
+│
+└─ 523-547: streamAnthropic()
+   ├─ 534: sendSSE('token')
+   └─ 546: return {fullText, toolCalls, rawAssistant}
+
+Tool Execution
+├─ 253: runTool() signature
+├─ 259: sendSSE('tool_start') [delegate_to_agents]
+├─ 277: sendSSE('tool_start') [general tools]
+├─ 280-284: Execute tool (withTimeout)
+├─ 288-291: sendSSE('tool_result')
+├─ 294-383: Sync to TripBook
+│  ├─ 300: sendSSE('rate_cached')
+│  ├─ 310: sendSSE('weather_cached')
+│  └─ 373: sendSSE('tripbook_update')
+└─ 399: return resultStr
+

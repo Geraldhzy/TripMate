@@ -1,0 +1,274 @@
+================================================================================
+                    AGENT SYSTEM - CURRENT vs PROPOSED
+================================================================================
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║                         CURRENT ARCHITECTURE (5 AGENTS)                    ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+                            Main Agent (Claude)
+                                  │
+                    delegate_to_agents [parallel dispatch]
+                                  │
+         ┌────────┬────────┬────────┬────────┬────────┐
+         │        │        │        │        │        │
+         ▼        ▼        ▼        ▼        ▼        ▼
+    Transport  Food      Hotel   Attractions Knowledge
+    Agent      Agent      Agent    Agent     Agent
+       │         │          │         │         │
+       │         │          │         │         │
+    Tools:    Tools:     Tools:    Tools:    Tools:
+    - search_  - search_ - search_  - search_ - web_
+      flights    poi       hotels    poi       search
+    - get_ex-  - web_    - search_  - web_    - get_
+      change_    search     poi       search    weather
+      rate               - get_ex-            - cache_
+    - web_               change_              dest_
+      search             rate                 know-
+                        - web_               ledge
+                          search
+
+    Max 3 rounds each | All run in parallel | Results combined
+
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║                  OPTION A: MERGED INTO 3 AGENTS (RECOMMENDED)              ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+                            Main Agent (Claude)
+                                  │
+                    delegate_to_agents [parallel dispatch]
+                                  │
+              ┌──────────┬────────────────────┬──────────┐
+              │          │                    │          │
+              ▼          ▼                    ▼          ▼
+         Transport  Accommodation          Knowledge
+         Agent      Agent (NEW)              Agent
+             │          │                      │
+             │          │                      │
+         Tools:      Tools:               Tools:
+         - search_   - search_hotels    - web_search
+           flights   - search_poi       - get_weather
+         - get_ex-   - get_exchange_    - cache_dest_
+           change_     rate             knowledge
+           rate     - web_search
+         - web_
+           search
+
+    ┌─ Merged: Hotel + Food + Attractions
+    │  (All 3 use search_poi & web_search)
+    │
+    └─ NEW accommodation agent handles:
+       • Hotels & pricing
+       • Restaurants & food
+       • Attractions & activities
+       • Local POI searches
+
+    Files to change:
+    ✓ agents/config.js           - Remove food/attractions, add accommodation
+    ✓ agents/prompts/             - Merge prompts: accommodation.js
+    ✓ agents/delegate.js          - Update enum (3 agents)
+
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║                  OPTION B: MERGED INTO 2 AGENTS (AGGRESSIVE)               ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+                            Main Agent (Claude)
+                                  │
+                    delegate_to_agents [parallel dispatch]
+                                  │
+                     ┌─────────────────────────┬─────────┐
+                     │                         │         │
+                     ▼                         ▼         ▼
+                 Planning Agent           Knowledge
+                 Agent (NEW)               Agent
+                     │                       │
+                     │                       │
+                 Tools:                   Tools:
+                 - search_flights        - web_search
+                 - search_hotels        - get_weather
+                 - search_poi           - cache_dest_
+                 - get_exchange_rate      knowledge
+                 - web_search
+
+    ┌─ Merged: Transport + Hotel + Food + Attractions
+    │  (All use web_search; many share get_exchange_rate)
+    │
+    └─ NEW planning agent handles:
+       • All search & booking activities
+       • Flights, hotels, restaurants, attractions
+       • Pricing and conversions
+
+    Tradeoff: Simpler but less specialized
+    - Agents become more complex
+    - Fewer delegation calls
+    - Overlapping responsibilities
+
+
+================================================================================
+                            TOOL MAPPING CHANGES
+================================================================================
+
+CURRENT STATE - Tool to Agent Mapping:
+┌────────────────────┬───────────┬──────┬───────┬───────────┬─────────┐
+│ Tool               │ Transport │ Food │ Hotel │ Attractions │ Knowledge │
+├────────────────────┼───────────┼──────┼───────┼───────────┼─────────┤
+│ web_search         │     ✓     │  ✓   │   ✓   │     ✓     │    ✓    │
+│ search_flights     │     ✓     │      │       │           │         │
+│ get_exchange_rate  │     ✓     │      │   ✓   │           │         │
+│ search_hotels      │           │      │   ✓   │           │         │
+│ search_poi         │           │  ✓   │   ✓   │     ✓     │         │
+│ get_weather        │           │      │       │           │    ✓    │
+│ cache_dest_know    │           │      │       │           │    ✓    │
+│ update_trip_info   │           │      │       │           │ (special)│
+└────────────────────┴───────────┴──────┴───────┴───────────┴─────────┘
+
+
+OPTION A (3 AGENTS) - Proposed Tool Mapping:
+┌────────────────────┬───────────┬────────────────┬─────────┐
+│ Tool               │ Transport │ Accommodation  │ Knowledge │
+├────────────────────┼───────────┼────────────────┼─────────┤
+│ web_search         │     ✓     │       ✓        │    ✓    │
+│ search_flights     │     ✓     │                │         │
+│ get_exchange_rate  │     ✓     │       ✓        │         │
+│ search_hotels      │           │       ✓        │         │
+│ search_poi         │           │       ✓        │         │
+│ get_weather        │           │                │    ✓    │
+│ cache_dest_know    │           │                │    ✓    │
+│ update_trip_info   │           │                │ (special)│
+└────────────────────┴───────────┴────────────────┴─────────┘
+
+Changes from current:
+  • Removes: food, attractions agents
+  • Adds:    accommodation agent (combines 3)
+  • Hotels gets: search_hotels, search_poi, get_exchange_rate, web_search
+                  + all tools from Food (search_poi, web_search)
+                  + all tools from Attractions (search_poi, web_search)
+
+
+================================================================================
+                           AGENT SPECIALIZATION
+================================================================================
+
+Transport Agent (✈️)
+  → Highly specialized for flights and pricing
+  → Few tools, focused responsibility
+  → No shared tools with other agents (except web_search)
+  → KEEP INDEPENDENT
+
+Accommodation Agent (🏨) [NEW - Merged]
+  → Combined from Hotel + Food + Attractions
+  → Shared tool: search_poi (all 3 use it)
+  → Shared tool: web_search (all use it)
+  → Shared tool: get_exchange_rate (Hotel uses it)
+  → Complementary responsibilities:
+     - Hotels: Accommodation queries
+     - Food: Restaurant queries (same search_poi tool)
+     - Attractions: Activity queries (same search_poi tool)
+
+Knowledge Agent (📚)
+  → Highly specialized for destination information
+  → Unique tools: get_weather, cache_destination_knowledge
+  → Web search for general knowledge lookup
+  → KEEP INDEPENDENT
+
+
+================================================================================
+                        EXECUTION FLOW EXAMPLE
+================================================================================
+
+USER REQUEST: "I want to go to Tokyo for 5 days with my family. Find flights 
+from Beijing, good sushi restaurants, 4-star hotels, and the weather forecast."
+
+MAIN AGENT ANALYSIS:
+  • Task 1: Find flights Beijing → Tokyo
+  • Task 2: Find sushi restaurants in Tokyo
+  • Task 3: Find 4-star hotels in Tokyo
+  • Task 4: Get weather forecast for Tokyo
+
+
+CURRENT (5 AGENTS):
+  ┌─→ Transport Agent: search_flights(BJ→TY)
+  ├─→ Food Agent: search_poi(sushi, Tokyo)
+  ├─→ Hotel Agent: search_hotels(Tokyo, dates) + search_poi(4-star)
+  ├─→ Attractions Agent: (not needed)
+  └─→ Knowledge Agent: get_weather(Tokyo, dates)
+
+OPTION A (3 AGENTS):
+  ┌─→ Transport Agent: search_flights(BJ→TY)
+  ├─→ Accommodation Agent: 
+  │     - search_poi(sushi, Tokyo)
+  │     - search_hotels(Tokyo, dates)
+  │     - search_poi(4-star, Tokyo)
+  │     - get_exchange_rate(JPY→CNY) [if needed]
+  └─→ Knowledge Agent: get_weather(Tokyo, dates)
+
+OPTION B (2 AGENTS):
+  ┌─→ Planning Agent:
+  │     - search_flights(BJ→TY)
+  │     - search_poi(sushi, Tokyo)
+  │     - search_hotels(Tokyo, dates)
+  │     - search_poi(4-star, Tokyo)
+  │     - get_exchange_rate(JPY→CNY) [if needed]
+  └─→ Knowledge Agent: get_weather(Tokyo, dates)
+
+
+================================================================================
+                         IMPLEMENTATION CHECKLIST
+================================================================================
+
+For Option A (Recommended):
+
+□ 1. Create agents/prompts/accommodation.js
+     - Combine logic from food.js, attractions.js, hotel.js
+     - Emphasize multi-role: hotels, restaurants, attractions
+
+□ 2. Update agents/config.js
+     - Remove: food, attractions
+     - Update: hotel → accommodation
+     - Configuration:
+       accommodation: {
+         tools: ['search_hotels', 'search_poi', 'get_exchange_rate', 'web_search'],
+         buildPrompt: accommodationPrompt.build,
+         maxRounds: 3,
+         icon: '🏨',
+         label: '住宿/美食/景点'
+       }
+
+□ 3. Update agents/delegate.js
+     - Enum check: 'accommodation' instead of 'hotel', 'food', 'attractions'
+     - Update description for delegate_to_agents
+
+□ 4. Test delegation
+     - Verify delegation sends tasks to correct agents
+     - Verify accommodation agent receives all 4 tools
+     - Verify results aggregation works
+
+□ 5. Update frontend (if applicable)
+     - Update agent selection dropdowns
+     - Update agent icons/labels in UI
+     - Update SSE event handling
+
+
+================================================================================
+                              RISK ANALYSIS
+================================================================================
+
+OPTION A (3 AGENTS - RECOMMENDED):
+  ✓ Low complexity merge
+  ✓ Maintains specialization for Transport & Knowledge
+  ✓ Accommodation agent has complementary tools & responsibilities
+  ⚠ Accommodation agent becomes more complex (3→1)
+  ⚠ May need to tune prompt for multi-role handling
+
+OPTION B (2 AGENTS - AGGRESSIVE):
+  ✓ Simplest possible configuration
+  ✓ Fewest delegation calls
+  ✗ High complexity merge
+  ✗ Planning agent loses specialization
+  ✗ Large prompt combining 4 domains
+  ✗ Higher risk of prompt confusion
+
+
+================================================================================

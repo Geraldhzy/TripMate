@@ -1,0 +1,254 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║         SYSTEM PROMPT REFACTORING - MIGRATION MAP                         ║
+║                                                                            ║
+║  What guidance exists → Where it needs to go → What to add to main prompt ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ TOOL: search_flights (Line 129 of system-prompt.js)                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ Current Main Prompt Guidance:                                               │
+│   "搜索机票报价（价格 USD），需转换为 CNY"                                   │
+│   (Search flight quotes USD, convert to CNY)                                │
+│                                                                              │
+│ Sub-Agent Source:                                                           │
+│   booking.js lines 23-78 (56 lines of detailed strategy)                   │
+│                                                                              │
+│ What to Add:                                                                │
+│   ├─ Airline ecosystem research step                                        │
+│   │  └─ Research route carriers, budget airlines not in GDS                │
+│   │     - List: AirAsia, Scoot, Jetstar, Cebu, VietJet (Asia)             │
+│   │     - List: Peach, Spring, HK Express (East Asia)                      │
+│   │     - List: Ryanair, EasyJet, Vueling (Europe)                         │
+│   │                                                                         │
+│   ├─ Multi-dimensional search strategy                                      │
+│   │  ├─ Multi-airport (SZX+HKG+CAN for Shenzhen, etc.)                     │
+│   │  ├─ Multi-destination (especially niche destinations)                   │
+│   │  ├─ Multi-date (±3 days, auto-retry if no results)                    │
+│   │  ├─ Middle-leg routes (split bookings for niche)                       │
+│   │  └─ Parallel batch calls (not sequential waiting)                       │
+│   │                                                                         │
+│   └─ Results presentation                                                   │
+│      ├─ Table format with: origin, dest, date, airline, USD, CNY, time     │
+│      ├─ Mark red-eye flights (22:00+ departure, 06:00- arrival)            │
+│      ├─ Flag budget airlines missed by search tool                         │
+│      ├─ Cheapest vs. Most Comfortable options                              │
+│      └─ Booking channels: Google Flights, Skyscanner, Tianxun             │
+│                                                                              │
+│ Estimated Size: +30-40 lines                                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ TOOL: search_hotels (Line 130 of system-prompt.js)                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ Current Main Prompt Guidance:                                               │
+│   "搜索酒店价格" (Search hotel prices)                                       │
+│                                                                              │
+│ Sub-Agent Source:                                                           │
+│   booking.js lines 87-143 (57 lines of detailed strategy)                  │
+│                                                                              │
+│ What to Add:                                                                │
+│   ├─ Discover local accommodation ecosystem                                │
+│   │  ├─ Platform discovery per destination                                 │
+│   │  │  - Japan: Jalan, Rakuten Travel                                     │
+│   │  │  - SE Asia: Agoda often cheaper than Booking                        │
+│   │  │  - China: 携程, 飞猪                                                │
+│   │  │  - Global: Booking, Hotels.com, Expedia, Airbnb                     │
+│   │  └─ Special accommodation types                                         │
+│   │     - Japan: ryokan, capsule hotel, machiya                            │
+│   │     - SE Asia: beach resort, water bungalow, eco-hotel                 │
+│   │     - Europe: castle hotel, historic renovation, Airbnb                │
+│   │                                                                         │
+│   ├─ Research approach                                                      │
+│   │  ├─ Find best neighborhoods (web_search first)                         │
+│   │  └─ Then search hotels in those areas                                  │
+│   │                                                                         │
+│   ├─ Selection logic                                                        │
+│   │  ├─ Tie to itinerary (proximity to attractions)                        │
+│   │  ├─ Offer 2-3 price tiers (budget, comfort, luxury)                    │
+│   │  └─ Hotel-as-destination concept (resorts, special hotels)             │
+│   │                                                                         │
+│   └─ Output format                                                          │
+│      ├─ Name (local + Chinese)                                             │
+│      ├─ Type, ratings, price/night (USD+CNY)                               │
+│      ├─ Location benefits                                                   │
+│      └─ Booking platform recommendation                                     │
+│                                                                              │
+│ Estimated Size: +35-45 lines                                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ TOOL: search_poi (Line 128 of system-prompt.js)                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ Current Main Prompt Guidance:                                               │
+│   "搜索餐厅、景点等地点信息和坐标"                                           │
+│   (Search restaurant/POI location info and coordinates)                     │
+│                                                                              │
+│ Sub-Agent Source:                                                           │
+│   activity.js lines 42-54 (multiple sections mention POI strategy)         │
+│                                                                              │
+│ What to Add:                                                                │
+│   ├─ Search quality filters                                                │
+│   │  ├─ Ratings ≥4.0                                                       │
+│   │  └─ Review count ≥100                                                   │
+│   │                                                                         │
+│   ├─ Search scope strategy                                                 │
+│   │  ├─ Search by neighborhood (not whole city)                            │
+│   │  │  - Tokyo: Asakusa, Shinjuku, Shibuya separately                    │
+│   │  │  - Paris: 1st arrond., Marais, Montmartre separately                │
+│   │  └─ This gives better results than city-wide search                    │
+│   │                                                                         │
+│   ├─ Support web_search with authority platforms                           │
+│   │  ├─ Restaurants: Tabelog (Japan), Michelin (Europe)                    │
+│   │  ├─ Attractions: Official tourism sites, GetYourGuide                  │
+│   │  └─ Both together give comprehensive results                           │
+│   │                                                                         │
+│   └─ Output grouping                                                        │
+│      ├─ Group by neighborhood                                              │
+│      ├─ Then by category (restaurant/attraction/activity)                   │
+│      └─ Within category, by meal time or type                              │
+│                                                                              │
+│ Estimated Size: +15-25 lines                                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ TOOL: web_search (Line 125 of system-prompt.js)                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ Current Main Prompt Guidance:                                               │
+│   "搜索签证政策、景点信息等" (Search visa policies, POI info, etc.)          │
+│                                                                              │
+│ Sub-Agent Sources:                                                          │
+│   - booking.js: airline ecosystem, platforms, pricing research              │
+│   - activity.js: restaurants platforms, attractions, experiences           │
+│   - knowledge.js: official sources, authority websites                      │
+│                                                                              │
+│ What to Add - Query Strategies by Category:                                │
+│                                                                              │
+│   FLIGHTS:                                                                  │
+│   │  "Carry query: [departure] [destination] airlines"                      │
+│   │  "Query: [departure] [destination] direct flights"                     │
+│   │  "Query: [airline name] official website prices"                       │
+│   │  "Query: [departure code] to [dest code] budget airlines"              │
+│   │                                                                         │
+│   HOTELS:                                                                   │
+│   │  "Query: [city] hotels best area to stay"                              │
+│   │  "Query: [city] accommodation platforms"                               │
+│   │  "Query: [city] special accommodations (ryokan, etc.)"                │
+│   │                                                                         │
+│   RESTAURANTS:                                                              │
+│   │  "Query: [city] restaurant review platforms best"                      │
+│   │  "Query: Tabelog [city] [neighborhood] restaurants"                    │
+│   │  "Query: Michelin [city] restaurants"                                  │
+│   │  "Query: [city] [month] seasonal foods"                               │
+│   │                                                                         │
+│   ATTRACTIONS:                                                              │
+│   │  "Query: [city] tourism authority official website"                    │
+│   │  "Query: [attraction name] opening hours tickets 2026"                │
+│   │  "Query: [city] hidden gems attractions"                               │
+│   │  "Query: [city] [month] festivals events"                             │
+│   │                                                                         │
+│   VISAS:                                                                    │
+│   │  "Query: [country] China passport entry requirements 2026"            │
+│   │  "Query: [country] official government visa website"                   │
+│   │  "Query: [country] visa policy official [year]"                       │
+│   │                                                                         │
+│   GENERAL:                                                                  │
+│   │  "Query: [destination] travel guide 2026"                             │
+│   │  "Query: [destination] safety transportation apps"                     │
+│   │                                                                         │
+│ Estimated Size: +40-60 lines                                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ TOOL: get_weather (Line 126 of system-prompt.js)                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ Current Main Prompt Guidance:                                               │
+│   "查询出行期间天气（必须传 start_date + end_date）"                         │
+│   (Query travel period weather, must pass start_date + end_date)            │
+│                                                                              │
+│ Sub-Agent Source:                                                           │
+│   knowledge.js lines 33-36 (weather strategy)                              │
+│                                                                              │
+│ What to Add:                                                                │
+│   ├─ Climate vs. forecast distinction                                      │
+│   │  ├─ Use actual forecast for confirmed trip dates                       │
+│   │  ├─ Use climate reference for unpredictable seasons                    │
+│   │  │  (typhoon season, monsoon, heavy rain months)                      │
+│   │  └─ Label difference in results                                        │
+│   │                                                                         │
+│   ├─ Timing of calls                                                       │
+│   │  ├─ Call early (to help with date confirmation)                        │
+│   │  └─ Call again closer to trip (for packing list)                       │
+│   │                                                                         │
+│   ├─ Historical reference                                                  │
+│   │  ├─ Get typical temps for month                                        │
+│   │  ├─ Check for extreme weather (typhoon season)                         │
+│   │  └─ Use for contingency planning                                       │
+│   │                                                                         │
+│   └─ Output use                                                             │
+│      ├─ Guide clothing recommendations                                      │
+│      ├─ Plan indoor/outdoor activities                                     │
+│      └─ Adjust itinerary if necessary                                      │
+│                                                                              │
+│ Estimated Size: +10-15 lines                                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ TOOL: get_exchange_rate (Line 127 of system-prompt.js)                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ Current Main Prompt Guidance:                                               │
+│   "查询实时汇率，同一货币对只需查一次"                                       │
+│   (Query real-time rates, query same pair only once)                        │
+│                                                                              │
+│ What Already Exists:                                                        │
+│   ✅ Deduplication rule (only once per pair)                               │
+│   ✅ Real-time nature emphasized                                           │
+│                                                                              │
+│ What to Enhance:                                                            │
+│   ├─ When to call                                                          │
+│   │  ├─ Every time showing prices in different currencies                  │
+│   │  ├─ Before finalizing costs for user                                   │
+│   │  └─ Don't assume rates stay constant across trip                       │
+│   │                                                                         │
+│   ├─ How to present                                                        │
+│   │  ├─ Always show both source and target currency                        │
+│   │  ├─ Include rate timestamp                                             │
+│   │  └─ Example: "1 USD = 7.25 CNY (as of 2026-04-13)"                    │
+│   │                                                                         │
+│   └─ Multi-currency trips                                                  │
+│      ├─ Query rates for each currency pair                                 │
+│      └─ Cache rates per conversation (don't re-query same pair)             │
+│                                                                              │
+│ Estimated Size: +5-10 lines (enhancement only)                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║                         MIGRATION SUMMARY                                 ║
+├════════════════════════════════════════════════════════════════════════════┤
+║                                                                            ║
+║  Current Main Prompt Size:        ~9.3 KB (187 lines)                      ║
+║  Expected Size After Migration:   ~15-20 KB (250-300 lines)               ║
+║                                                                            ║
+║  Total Lines to Add:              ~100-150 lines                           ║
+║                                                                            ║
+║  Breakdown:                                                                ║
+║   ├─ search_flights:     +30-40 lines                                      ║
+║   ├─ search_hotels:      +35-45 lines                                      ║
+║   ├─ search_poi:         +15-25 lines                                      ║
+║   ├─ web_search:         +40-60 lines                                      ║
+║   ├─ get_weather:        +10-15 lines                                      ║
+║   └─ get_exchange_rate:  +5-10 lines (enhancement)                         ║
+║                                                                            ║
+║  Trade-off:                                                                ║
+║   ✅ Fewer API calls (no delegation roundtrips)                            ║
+║   ✅ Faster total response (parallel tool calls)                           ║
+║   ⚠️  Larger initial prompt (15-20 KB vs 9.3 KB)                          ║
+║   ⚠️  Potentially longer main loop iterations                              ║
+║                                                                            ║
+╚════════════════════════════════════════════════════════════════════════════╝

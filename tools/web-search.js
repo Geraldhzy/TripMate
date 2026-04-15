@@ -9,6 +9,7 @@
  */
 const https = require('https');
 const http = require('http');
+const log = require('../utils/logger');
 
 // 调试模式 - 通过环境变量启用
 const DEBUG = process.env.WEB_SEARCH_DEBUG === 'true';
@@ -238,7 +239,7 @@ async function execute({ query, language = 'zh-CN' }) {
       userNote = '网络连接问题，请检查网络设置';
     }
     
-    console.error(`[web-search] Error for query "${query}": ${err.message}`);
+    log.error('web-search 查询失败', { query, error: err.message });
     return JSON.stringify({ query, error: err.message, note: userNote });
   }
 }

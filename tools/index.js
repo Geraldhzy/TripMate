@@ -1,20 +1,17 @@
 /**
  * 工具注册中心
- * 导出 OpenAI / Anthropic 两种格式的工具定义 + 统一的工具执行器
+ * 导出 OpenAI function calling 格式的工具定义 + 统一的工具执行器
  */
 const webSearch = require('./web-search');
-const weather = require('./weather');
-const exchangeRate = require('./exchange-rate');
 const poiSearch = require('./poi-search');
 const flightSearch = require('./flight-search');
 const hotelSearch = require('./hotel-search');
-const destKnowledge = require('./dest-knowledge');
 const updateTripInfo = require('./update-trip-info');
 const delegate = require('../agents/delegate');
 
-const ALL_TOOLS = [webSearch, weather, exchangeRate, poiSearch, flightSearch, hotelSearch, destKnowledge, updateTripInfo];
+const ALL_TOOLS = [webSearch, poiSearch, flightSearch, hotelSearch, updateTripInfo];
 
-// OpenAI function calling 格式（含 delegate_to_agents）
+// OpenAI function calling 格式（含 delegate_to_agents）— 子 Agent 选取工具时使用
 function getToolDefinitions() {
   const tools = ALL_TOOLS.map(t => ({
     type: 'function',
@@ -24,7 +21,6 @@ function getToolDefinitions() {
       parameters: t.TOOL_DEF.parameters
     }
   }));
-  // 添加 delegate_to_agents
   tools.push({
     type: 'function',
     function: {
@@ -36,20 +32,14 @@ function getToolDefinitions() {
   return tools;
 }
 
-// Anthropic tool use 格式（含 delegate_to_agents）
-function getToolDefinitionsForAnthropic() {
-  const tools = ALL_TOOLS.map(t => ({
-    name: t.TOOL_DEF.name,
-    description: t.TOOL_DEF.description,
-    input_schema: t.TOOL_DEF.parameters
-  }));
-  // 添加 delegate_to_agents
-  tools.push({
-    name: delegate.TOOL_DEF.name,
-    description: delegate.TOOL_DEF.description,
-    input_schema: delegate.TOOL_DEF.parameters
-  });
-  return tools;
+// 主 Agent 专属工具列表：排除子 Agent 独占工具（search_flights）
+// search_flights 由 flight 子 Agent 独占使用，主 Agent 必须通过 delegate_to_agents 委派
+const SUB_AGENT_EXCLUSIVE_TOOLS = new Set(['search_flights']);
+
+function getMainAgentToolDefinitions() {
+  return getToolDefinitions().filter(
+    t => !SUB_AGENT_EXCLUSIVE_TOOLS.has(t.function.name)
+  );
 }
 
 // 统一工具执行器（不含 delegate_to_agents，该工具由 server.js 特殊处理）
@@ -64,10 +54,4 @@ async function executeToolCall(name, args) {
   return handler(args);
 }
 
-module.exports = { getToolDefinitions, getToolDefinitionsForAnthropic, executeToolCall };
-
-const { getAllCachedDests } = require('./dest-knowledge');
-module.exports.getAllCachedDests = getAllCachedDests;
-
-const { getCachedWeather } = require('./weather');
-module.exports.getCachedWeather = getCachedWeather;
+module.exports = { getToolDefinitions, getMainAgentToolDefinitions, executeToolCall, SUB_AGENT_EXCLUSIVE_TOOLS };

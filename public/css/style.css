@@ -100,79 +100,17 @@ body {
   z-index: 0;
 }
 
-/* ── 侧边书签 Tab ───────────────────── */
-.tab-sidebar {
-  display: flex;
-  flex-direction: column;
-  width: 56px;
-  flex-shrink: 0;
-  padding: 10px 0;
-  gap: 2px;
-  background: rgba(15,23,42,.6);
-  border-right: 1px solid rgba(59,130,246,.1);
-  overflow-y: auto;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-  z-index: 2;
+/* ── Section 分隔样式 ────────────────── */
+.panel-section {
+  margin-bottom: 16px;
 }
-.tab-sidebar::-webkit-scrollbar { display: none; }
-
-.tab-btn {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 2px;
-  width: 100%;
-  padding: 8px 4px;
-  border: none;
-  border-left: 3px solid transparent;
-  border-radius: 0;
-  background: transparent;
-  cursor: pointer;
-  transition: all .2s;
-  color: #64748b;
-}
-.tab-icon {
-  font-size: 16px;
-  line-height: 1;
-}
-.tab-label {
-  font-size: 10px;
-  line-height: 1;
-  letter-spacing: .2px;
-  white-space: nowrap;
-}
-.tab-btn:hover {
-  background: rgba(59,130,246,.08);
-  color: #93c5fd;
-}
-.tab-btn.active {
-  background: rgba(59,130,246,.12);
-  color: #93c5fd;
-  border-left-color: #3b82f6;
-}
-
-/* Tab 徽标（数据条目计数） */
-.tab-badge {
-  position: absolute;
-  top: 4px;
-  right: 6px;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
-  border-radius: 8px;
-  background: #3b82f6;
-  color: #fff;
-  font-size: 10px;
-  font-weight: 700;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  line-height: 1;
-  box-shadow: 0 1px 4px rgba(59,130,246,.4);
-  pointer-events: none;
+.panel-section-header {
+  font-size: 14px;
+  font-weight: 600;
+  color: #94a3b8;
+  padding: 10px 14px 6px;
+  border-bottom: 1px solid rgba(255,255,255,.06);
+  margin-bottom: 10px;
 }
 
 /* ── 内容区（标题 + body） ────────────── */
@@ -288,20 +226,6 @@ body {
   font-weight: 500;
   color: #e2e8f0;
 }
-.itin-edit-btn {
-  opacity: 0;
-  cursor: pointer;
-  font-size: 12px;
-  color: #60a5fa;
-  transition: opacity .18s;
-  background: none;
-  border: none;
-  padding: 2px 4px;
-  flex-shrink: 0;
-}
-.itin-info-item:hover .itin-edit-btn {
-  opacity: 1;
-}
 
 /* ── 偏好标签条 ── */
 .itin-tags-bar {
@@ -318,31 +242,22 @@ body {
   color: #cbd5e1;
 }
 
-/* ── 进度条区域 ── */
-.itin-progress-bar {
+/* ── 阶段状态文字 ── */
+.itin-phase-status {
   padding: 8px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
-.itin-progress-text {
+.itin-phase-current {
   font-size: 12px;
-  color: #94a3b8;
-  display: block;
-  margin-bottom: 6px;
+  color: #93c5fd;
+  font-weight: 500;
 }
-
-/* 可编辑字段 inline input */
-.itin-inline-input {
-  flex: 1;
-  background: rgba(255,255,255,.1);
-  border: 1px solid #60a5fa;
-  border-radius: 6px;
-  color: #e2e8f0;
-  font-size: 13px;
-  padding: 3px 6px;
-  outline: none;
-  font-family: inherit;
+.itin-phase-next {
+  font-size: 11px;
+  color: #64748b;
 }
-
-/* ── section header（标题 + 操作按钮） ── */
 .itin-section-header {
   display: flex;
   align-items: center;
@@ -375,29 +290,6 @@ body {
   margin-right: 6px;
   margin-bottom: 4px;
   border: 1px solid rgba(59,130,246,.1);
-}
-
-/* 阶段进度条 */
-.itin-progress {
-  display: flex;
-  gap: 3px;
-}
-.itin-progress-seg {
-  flex: 1;
-  height: 4px;
-  border-radius: 2px;
-  background: rgba(255,255,255,.08);
-}
-.itin-progress-seg.done {
-  background: linear-gradient(90deg, #3b82f6, #60a5fa);
-}
-.itin-progress-seg.active {
-  background: #60a5fa;
-  animation: itinPulse 1.5s infinite;
-}
-@keyframes itinPulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: .4; }
 }
 
 /* 机票/酒店摘要卡片 */
@@ -487,16 +379,18 @@ body {
 .day-num {
   background: linear-gradient(135deg, #3b82f6, #2563eb);
   color: #fff;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 700;
-  padding: 2px 8px;
+  padding: 4px 12px;
   border-radius: 10px;
   flex-shrink: 0;
+  letter-spacing: .5px;
+  text-shadow: 0 1px 2px rgba(0,0,0,.25);
   box-shadow: 0 2px 6px rgba(59,130,246,.3);
 }
 .day-date {
-  font-size: 11px;
-  color: #94a3b8;
+  font-size: 13px;
+  color: #cbd5e1;
 }
 .day-city {
   font-size: 11px;
@@ -571,6 +465,28 @@ body {
 .timeline-dot.meal { background: #f59e0b; box-shadow: 0 0 6px rgba(245,158,11,.4); }
 .timeline-dot.transport { background: #64748b; box-shadow: none; }
 .timeline-dot.hotel { background: #a78bfa; box-shadow: 0 0 6px rgba(167,139,250,.4); }
+.timeline-dot.flight { background: #38bdf8; box-shadow: 0 0 6px rgba(56,189,248,.4); }
+
+/* 时间线内的航班/酒店醒目卡片 */
+.timeline-booking-card {
+  background: rgba(59,130,246,.08);
+  border: 1px solid rgba(59,130,246,.2);
+  border-radius: 8px;
+  padding: 6px 10px;
+  margin-bottom: 2px;
+}
+.timeline-booking-title {
+  font-size: 12px;
+  color: #93c5fd;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.timeline-booking-detail {
+  font-size: 11px;
+  color: #64748b;
+  margin-top: 2px;
+  line-height: 1.3;
+}
 .timeline-line {
   width: 2px;
   flex: 1;
@@ -656,17 +572,22 @@ body {
   margin-bottom: 4px;
   flex-wrap: wrap;
 }
-.day-num {
+.itin-day-header-compact .day-num {
   font-size: 12px;
   font-weight: 600;
   color: #3b82f6;
   min-width: 38px;
+  background: none;
+  padding: 0;
+  box-shadow: none;
+  text-shadow: none;
+  border-radius: 0;
 }
-.day-date {
+.itin-day-header-compact .day-date {
   font-size: 11px;
   color: #94a3b8;
 }
-.day-city {
+.itin-day-header-compact .day-city {
   font-size: 11px;
   color: #64748b;
   background: rgba(59,130,246,.1);
@@ -787,69 +708,6 @@ body {
   font-size: 12px;
   color: #94a3b8;
   line-height: 1.5;
-}
-
-/* 提醒 checklist */
-.reminder-list {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-}
-.reminder-item {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 6px 0;
-  font-size: 13px;
-  color: #cbd5e1;
-  border-bottom: 1px solid rgba(255,255,255,.04);
-}
-.reminder-item:last-child {
-  border-bottom: none;
-}
-.reminder-check {
-  flex-shrink: 0;
-  width: 16px;
-  height: 16px;
-  border-radius: 4px;
-  border: 1.5px solid rgba(59,130,246,.4);
-  margin-top: 1px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 10px;
-  cursor: pointer;
-  transition: all .2s;
-}
-.reminder-check:hover {
-  border-color: #3b82f6;
-  background: rgba(59,130,246,.1);
-}
-.reminder-check.checked {
-  background: #3b82f6;
-  border-color: #3b82f6;
-  color: #fff;
-}
-
-/* 汇率卡片 */
-.rate-card {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  background: rgba(59,130,246,.1);
-  border: 1px solid rgba(59,130,246,.2);
-  border-radius: 10px;
-  padding: 8px 14px;
-  margin: 0 8px 8px 0;
-  font-size: 13px;
-  color: #93c5fd;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-.rate-card small {
-  font-weight: 400;
-  color: #64748b;
-  font-size: 11px;
 }
 
 /* 餐饮/景点提取卡片 */
@@ -1226,65 +1084,6 @@ body {
   pointer-events: none;
 }
 
-/* ── 思考过程折叠块 ───────────────────── */
-.think-block {
-  background: #eff6ff;
-  border: 1px solid #bfdbfe;
-  border-radius: 10px;
-  margin: 8px 0;
-  overflow: hidden;
-}
-.think-block summary {
-  padding: 8px 14px;
-  font-size: 13px;
-  color: #1e40af;
-  cursor: pointer;
-  user-select: none;
-  list-style: none;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.think-block summary::-webkit-details-marker { display: none; }
-.think-block summary::after {
-  content: '▶';
-  font-size: 10px;
-  transition: transform .2s;
-  margin-left: auto;
-}
-.think-block[open] summary::after {
-  transform: rotate(90deg);
-}
-.think-block.thinking summary {
-  color: #2563eb;
-}
-.think-content {
-  padding: 6px 14px 12px;
-  font-size: 12.5px;
-  line-height: 1.6;
-  color: #1e40af;
-  border-top: 1px solid #bfdbfe;
-}
-.thinking-spinner {
-  display: inline-flex;
-  gap: 4px;
-  margin-left: 6px;
-  vertical-align: middle;
-}
-.thinking-spinner span {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: #3b82f6;
-  animation: thinkDot 1.2s ease-in-out infinite;
-}
-.thinking-spinner span:nth-child(2) { animation-delay: .2s; }
-.thinking-spinner span:nth-child(3) { animation-delay: .4s; }
-@keyframes thinkDot {
-  0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
-  40% { opacity: 1; transform: scale(1); }
-}
-
 /* ── 消息气泡 ─────────────────────────── */
 .message {
   display: flex;
@@ -1380,6 +1179,12 @@ body {
 
 /* ── 工具状态 ─────────────────────────── */
 .tool-container { display: flex; flex-direction: column; gap: 4px; }
+.round-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 8px 0;
+  opacity: 0.5;
+}
 .tool-status {
   display: inline-flex;
   align-items: center;
@@ -1405,6 +1210,59 @@ body {
   width: 12px;
   height: 12px;
   border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+  flex-shrink: 0;
+}
+
+/* ── 委派进度面板（机票搜索聚合展示）──────── */
+.delegate-panel {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 10px 14px;
+  margin: 6px 0;
+  animation: fadeIn .25s;
+  max-width: 400px;
+}
+.delegate-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #2563eb;
+  padding-bottom: 6px;
+}
+.delegate-panel-header.done {
+  color: var(--success);
+  padding-bottom: 0;
+}
+.delegate-panel-routes {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-left: 2px;
+}
+.delegate-panel.collapsed .delegate-panel-routes {
+  display: none;
+}
+.delegate-route {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #64748b;
+  padding: 2px 0;
+}
+.delegate-route.running { color: #2563eb; }
+.delegate-route.done { color: var(--success); }
+.delegate-route.error { color: #ef4444; }
+.delegate-route .spinner.small {
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid currentColor;
   border-top-color: transparent;
   border-radius: 50%;
   animation: spin .8s linear infinite;
@@ -1533,6 +1391,24 @@ body {
 .typing-dots span:nth-child(1) { animation-delay: 0s; }
 .typing-dots span:nth-child(2) { animation-delay: .2s; }
 .typing-dots span:nth-child(3) { animation-delay: .4s; }
+
+/* ── 思考中指示器 ────────────────────────── */
+.thinking-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 2px;
+  color: #6b7280;
+  font-size: 0.9em;
+}
+.thinking-indicator .spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid #d1d5db;
+  border-top-color: #3b82f6;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
 
 /* ── 输入区 ───────────────────────────── */
 .input-area {
@@ -1731,8 +1607,6 @@ body {
 @media (max-width: 1200px) {
   .chat-panel { flex: 1 1 50%; }
   .itinerary-panel { flex: 1 1 50%; min-width: 360px; }
-  .tab-sidebar { width: 48px; }
-  .tab-label { display: none; }
 }
 @media (max-width: 900px) {
   .itinerary-panel { display: none; }
