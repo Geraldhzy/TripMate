@@ -172,16 +172,18 @@ describe('TripBook', () => {
       expect(tripBook.itinerary.days[0].notes).toBe('updated');
     });
 
-    test('updateItinerary should merge new segments with existing ones', () => {
+    test('updateItinerary should replace segments when updating a day', () => {
       tripBook.updateItinerary({
         days: [{ day: 1, city: 'Tokyo', segments: [
           { time: '09:00', title: '浅草寺', type: 'attraction' },
           { time: '12:00', title: '午餐', type: 'meal' }
         ] }]
       });
-      // 添加新的 segment，不应丢失原有的
+      // 整天替换：传入该天完整的 segments（含旧的 + 新增的）
       tripBook.updateItinerary({
         days: [{ day: 1, segments: [
+          { time: '09:00', title: '浅草寺', type: 'attraction' },
+          { time: '12:00', title: '午餐', type: 'meal' },
           { time: '15:00', title: '东京塔', type: 'attraction' }
         ] }]
       });
@@ -190,13 +192,13 @@ describe('TripBook', () => {
         .toEqual(['浅草寺', '午餐', '东京塔']);
     });
 
-    test('updateItinerary should update existing segment by time+title match', () => {
+    test('updateItinerary should fully replace segments (no merge)', () => {
       tripBook.updateItinerary({
         days: [{ day: 1, segments: [
           { time: '09:00', title: '浅草寺', type: 'attraction', notes: '' }
         ] }]
       });
-      // 更新同一个 segment 的 notes
+      // 传入新的完整 segments → 完全替换旧数据
       tripBook.updateItinerary({
         days: [{ day: 1, segments: [
           { time: '09:00', title: '浅草寺', notes: '门票免费' }
@@ -204,23 +206,21 @@ describe('TripBook', () => {
       });
       expect(tripBook.itinerary.days[0].segments).toHaveLength(1);
       expect(tripBook.itinerary.days[0].segments[0].notes).toBe('门票免费');
-      expect(tripBook.itinerary.days[0].segments[0].type).toBe('attraction');
     });
 
-    test('updateItinerary with _replace should fully replace segments', () => {
+    test('updateItinerary should preserve segments when only updating metadata', () => {
       tripBook.updateItinerary({
         days: [{ day: 1, segments: [
           { time: '09:00', title: '旧活动A' },
           { time: '12:00', title: '旧活动B' }
         ] }]
       });
+      // 只更新 title，不传 segments → 原有 segments 保留
       tripBook.updateItinerary({
-        days: [{ day: 1, _replace: true, segments: [
-          { time: '10:00', title: '新活动C' }
-        ] }]
+        days: [{ day: 1, title: '新标题' }]
       });
-      expect(tripBook.itinerary.days[0].segments).toHaveLength(1);
-      expect(tripBook.itinerary.days[0].segments[0].title).toBe('新活动C');
+      expect(tripBook.itinerary.days[0].segments).toHaveLength(2);
+      expect(tripBook.itinerary.days[0].title).toBe('新标题');
     });
 
     test('updateItinerary should not affect unmentioned days', () => {
@@ -231,13 +231,14 @@ describe('TripBook', () => {
           { day: 3, city: 'Kyoto', segments: [{ time: '09:00', title: 'C' }] }
         ]
       });
-      // 只更新 day 2
+      // 只更新 day 2（整天替换）
       tripBook.updateItinerary({
         days: [{ day: 2, segments: [{ time: '14:00', title: 'D' }] }]
       });
       expect(tripBook.itinerary.days).toHaveLength(3);
       expect(tripBook.itinerary.days[0].segments[0].title).toBe('A'); // day 1 untouched
-      expect(tripBook.itinerary.days[1].segments).toHaveLength(2);    // day 2 merged
+      expect(tripBook.itinerary.days[1].segments).toHaveLength(1);    // day 2 replaced (only D)
+      expect(tripBook.itinerary.days[1].segments[0].title).toBe('D');
       expect(tripBook.itinerary.days[2].segments[0].title).toBe('C'); // day 3 untouched
     });
   });

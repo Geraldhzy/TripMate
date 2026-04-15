@@ -294,8 +294,7 @@ function handleSSEEvent(type, data, bubble, toolContainer, getFullText) {
         const batchEl = toolContainer.querySelector('.agent-batch');
         if (batchEl && batchEl.classList.contains('running')) {
           batchEl.className = 'tool-status agent-batch done';
-          const label = data.resultLabel || '委派完成';
-          batchEl.innerHTML = `<span>✅ ${label}</span>`;
+          batchEl.innerHTML = `<span>✅ 信息搜集完成</span>`;
         }
         scrollToBottom();
         break;
@@ -308,22 +307,36 @@ function handleSSEEvent(type, data, bubble, toolContainer, getFullText) {
           const total = parseInt(groupEl.dataset.total);
           const done = parseInt(groupEl.dataset.done) + 1;
           groupEl.dataset.done = done;
+          // 累积 resultLabel 用于最终展示
+          if (data.resultLabel) {
+            const prev = groupEl.dataset.resultLabels || '';
+            groupEl.dataset.resultLabels = prev ? `${prev} · ${data.resultLabel}` : data.resultLabel;
+          }
           if (done >= total) {
             groupEl.className = 'tool-status done';
-            groupEl.innerHTML = `<span>${groupLabel(groupName, total, total)}</span>`;
+            const finalLabel = groupEl.dataset.resultLabels;
+            const icon = { search_flights: '✈️', search_hotels: '🏨', web_search: '🔍' }[groupName] || '🔍';
+            groupEl.innerHTML = finalLabel
+              ? `<span>✅ ${icon} ${finalLabel}</span>`
+              : `<span>${groupLabel(groupName, total, total)}</span>`;
           } else {
             groupEl.innerHTML = `<div class="spinner"></div><span>${groupLabel(groupName, total, done)}</span>`;
           }
         }
         break;
       }
-      // 普通工具：优先用服务端生成的 resultLabel，其次用原始搜索内容标签
+      // 普通工具：完成状态展示
       const runningEl = toolContainer.querySelector(`[data-tool-id="${key}"]`);
       if (runningEl) {
         runningEl.className = 'tool-status done';
-        const fallbackLabel = runningEl.dataset.label || toolLabel(data.name, null);
-        const displayLabel = data.resultLabel ? `${fallbackLabel} — ${data.resultLabel}` : fallbackLabel;
-        runningEl.innerHTML = `<span>✅ ${displayLabel}</span>`;
+        if (data.name === 'update_trip_info') {
+          const detail = data.resultLabel || '已更新';
+          runningEl.innerHTML = `<span>✅ 📋 ${detail}</span>`;
+        } else {
+          const fallbackLabel = runningEl.dataset.label || toolLabel(data.name, null);
+          const displayLabel = data.resultLabel ? `${fallbackLabel} — ${data.resultLabel}` : fallbackLabel;
+          runningEl.innerHTML = `<span>✅ ${displayLabel}</span>`;
+        }
       }
       break;
     }
@@ -335,7 +348,7 @@ function handleSSEEvent(type, data, bubble, toolContainer, getFullText) {
       const batchEl = document.createElement('div');
       batchEl.className = 'tool-status agent-batch running';
       const agentLabels = (data.agents || []).map(a => `${a.icon || '🔧'} ${a.label}`).join(' + ');
-      batchEl.innerHTML = `<div class="spinner"></div><span>正在并行执行：${agentLabels}</span>`;
+      batchEl.innerHTML = `<div class="spinner"></div><span>正在为你搜集信息：${agentLabels}</span>`;
       toolContainer.appendChild(batchEl);
       // 确保 bubble 保持 typing-dots（委派期间主 Agent 处于思考等待状态）
       if (!getFullText()) {
@@ -413,8 +426,8 @@ function handleSSEEvent(type, data, bubble, toolContainer, getFullText) {
       if (batchEl && batchEl.classList.contains('running')) {
         batchEl.className = 'tool-status agent-batch done';
         const successText = data.failed > 0
-          ? `✅ 并行委派完成（${data.success}/${data.count} 成功）`
-          : `✅ 并行委派完成（${data.count} 项全部成功）`;
+          ? `✅ 信息搜集完成（${data.success}/${data.count} 项成功）`
+          : `✅ 信息搜集完成`;
         batchEl.innerHTML = `<span>${successText}</span>`;
       }
       // 恢复 bubble 的 typing-dots（等待主 Agent 基于结果生成回复）
@@ -691,9 +704,9 @@ function toolLabel(name, args) {
       search_poi: '📍 地点搜索',
       search_flights: '✈️ 机票搜索',
       search_hotels: '🏨 酒店搜索',
-      cache_destination_knowledge: '📚 缓存目的地知识',
-      update_trip_info: '📋 更新行程参考书',
-      delegate_to_agents: '🤖 委派子Agent'
+      cache_destination_knowledge: '📚 整理目的地信息',
+      update_trip_info: '📋 整理行程信息',
+      delegate_to_agents: '🔍 正在搜集信息'
     };
     return nameMap[name] || name;
   }
@@ -712,16 +725,16 @@ function toolLabel(name, args) {
     case 'search_hotels':
       return `🏨 搜索 ${args.city || ''} ${args.check_in || ''} 酒店`;
     case 'cache_destination_knowledge':
-      return `📚 缓存「${args.destination || ''}」知识`;
+      return `📚 整理「${args.destination || ''}」信息`;
     case 'update_trip_info':
-      return '📋 更新行程参考书';
+      return '📋 正在更新行程...';
     case 'delegate_to_agents': {
       const agents = (args.tasks || []).map(t => {
         const icons = { flight: '✈️', research: '📋' };
-        const names = { flight: '机票搜索', research: '目的地调研' };
+        const names = { flight: '机票查询', research: '目的地调研' };
         return `${icons[t.agent] || '🔧'}${names[t.agent] || t.agent}`;
       });
-      return agents.length > 0 ? `🤖 委派：${agents.join(' + ')}` : '🤖 委派子Agent';
+      return agents.length > 0 ? `正在搜集信息：${agents.join(' + ')}` : '🔍 正在搜集信息';
     }
     default:
       return name;

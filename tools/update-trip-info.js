@@ -39,14 +39,17 @@ const TOOL_DEF = {
       },
       phase: {
         type: 'integer',
-        description: '当前规划阶段（1-7）：1锁定约束 2机票查询 3构建框架 4关键预订 5每日详情 6预算汇总 7导出总结'
+        description: '当前规划阶段（1-4）：1了解需求 2规划框架 3完善详情 4行程总结'
       },
       itinerary: {
         type: 'object',
         description: [
           '行程数据增量更新。可包含：',
+          'theme: "海岛潜水·城市探索之旅" — 旅行主题标语，根据用户需求和目的地特色生成一句凸显旅行主题的短语（10-20字），在行程框架确定后写入。',
           'route: ["东京","京都","大阪"]，',
-          'days: [{ day: 1, date: "2026-05-01", city: "东京", title: "抵达东京", segments: [{ time: "14:00", title: "抵达机场", type: "flight", location: "成田机场", duration: "", notes: "" }, { time: "19:00", title: "晚餐：浅草天妇罗", type: "meal", location: "大黒家", notes: "人均¥2000日元" }] }]，',
+          'days: [{ day: 1, date: "2026-05-01", city: "东京", title: "抵达东京", segments: [...] }]，',
+          '⚠️ 重要：days 按天级替换。只传需要修改的天（未传的天保持不变）。每次传某天时，必须包含该天的完整 segments 列表，系统会用你传入的 segments 完全覆盖该天已有数据。',
+          'segment 格式：{ time: "14:00", title: "抵达机场", type: "flight", location: "成田机场", duration: "", notes: "" }，',
           'segment.type 必须是以下之一：transport（交通）、attraction（景点）、activity（体验活动）、meal（餐饮）、hotel（住宿）、flight（航班），用于前端分类展示。',
           'budgetSummary: { flights: { amount_cny: 6480, label: "机票" }, ..., total_cny: 17964 }，',
           'reminders: ["出发前完成Visit Japan Web注册", "兑换3万日元现金", "购买旅行保险"] — 行前准备清单，在最终阶段必须写入，',
@@ -80,13 +83,12 @@ async function execute(args) {
     specialRequests: '特殊需求',
   };
 
-  // 内部7阶段 → 面板4阶段映射（与前端 itinerary.js 的 mapPhase 保持一致）
-  function mapPhaseToDisplay(raw) {
-    if (raw <= 1) return { num: 1, label: '确认需求' };
-    if (raw <= 3) return { num: 2, label: '规划行程' };
-    if (raw <= 5) return { num: 3, label: '完善细节' };
-    return { num: 4, label: '预算总结' };
-  }
+  const PHASE_DISPLAY = {
+    1: '了解需求',
+    2: '规划框架',
+    3: '完善详情',
+    4: '行程总结',
+  };
 
   if (constraints) {
     // ⚠️ CRITICAL: Ensure all constraint fields have confirmed: true for system prompt injection
@@ -117,12 +119,11 @@ async function execute(args) {
   }
 
   if (phase !== undefined) {
-    if (phase < 1 || phase > 7) {
-      return JSON.stringify({ error: 'phase 必须在 1-7 之间' });
+    if (phase < 1 || phase > 4) {
+      return JSON.stringify({ error: 'phase 必须在 1-4 之间' });
     }
     updates.phase = phase;
-    const display = mapPhaseToDisplay(phase);
-    messages.push(`${display.label}（${display.num}/4）`);
+    messages.push(`${PHASE_DISPLAY[phase] || ''}（${phase}/4）`);
   }
 
   if (itinerary) {

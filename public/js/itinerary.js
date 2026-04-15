@@ -5,6 +5,7 @@
 let itineraryState = {
   destination: '',
   departCity: '',
+  theme: '',
   dates: '',
   days: 0,
   people: 0,
@@ -23,6 +24,8 @@ let itineraryState = {
 
 // 记录哪些 day 是展开的
 const expandedDays = new Set();
+// 记录刚被更新的 day（用于触发高亮动画）
+let justUpdatedDays = new Set();
 
 const PHASE_LABELS = [
   '', // 0 = 未开始
@@ -80,11 +83,12 @@ function updateItinerary(data) {
 // ============================================================
 function clearItinerary() {
   itineraryState = {
-    destination: '', departCity: '', dates: '', days: 0,
+    destination: '', departCity: '', theme: '', dates: '', days: 0,
     people: 0, budget: '', preferences: [],
     phase: 0, phaseLabel: '',
     flights: [], hotels: [], weather: null, weatherList: null,
     route: [], daysPlan: [], budgetSummary: null,
+    reminders: [], practicalInfo: [],
   };
   expandedDays.clear();
 
@@ -119,6 +123,7 @@ function updateFromTripBook(data) {
       
       if (d.destination) itineraryState.destination = d.destination;
       if (d.departCity) itineraryState.departCity = d.departCity;
+      if (d.theme) itineraryState.theme = d.theme;
       if (d.dates) itineraryState.dates = d.dates;
       if (d.days) itineraryState.days = d.days;
       if (d.people) itineraryState.people = d.people;
@@ -134,6 +139,27 @@ function updateFromTripBook(data) {
         itineraryState.route = d.route;
       }
       if (d.daysPlan && d.daysPlan.length > 0) {
+        // 检测哪些天发生了变化（对比 segments 数量或内容）
+        const changedDayNums = new Set();
+        for (const newDay of d.daysPlan) {
+          const oldDay = itineraryState.daysPlan.find(od => od.day === newDay.day);
+          if (!oldDay) {
+            // 新增的天
+            changedDayNums.add(newDay.day);
+          } else {
+            // 对比 segments 内容是否变化
+            const oldSig = JSON.stringify((oldDay.segments || []).map(s => s.time + '|' + s.title));
+            const newSig = JSON.stringify((newDay.segments || []).map(s => s.time + '|' + s.title));
+            if (oldSig !== newSig) {
+              changedDayNums.add(newDay.day);
+            }
+          }
+        }
+        // 自动展开有变化的天
+        for (const dayNum of changedDayNums) {
+          expandedDays.add(dayNum);
+        }
+        justUpdatedDays = changedDayNums;
         itineraryState.daysPlan = d.daysPlan;
       }
       if (d.budgetSummary) {
@@ -151,8 +177,34 @@ function updateFromTripBook(data) {
       if (d.weatherList) {
         itineraryState.weatherList = d.weatherList;
       }
+      if (d.reminders && d.reminders.length > 0) {
+        itineraryState.reminders = d.reminders;
+      }
+      if (d.practicalInfo && d.practicalInfo.length > 0) {
+        itineraryState.practicalInfo = d.practicalInfo;
+      }
       
-      try { renderPanel(); } catch(e) { console.error('renderPanel error:', e); }
+      try {
+        renderPanel();
+        // 对刚更新的 day card 触发高亮动画 + 滚动到可视区
+        if (justUpdatedDays.size > 0) {
+          let firstCard = null;
+          for (const dayNum of justUpdatedDays) {
+            const card = document.getElementById(`day-card-${dayNum}`);
+            if (card) {
+              card.classList.add('day-updated');
+              if (!firstCard) firstCard = card;
+              // 动画结束后移除 class
+              setTimeout(() => card.classList.remove('day-updated'), 1500);
+            }
+          }
+          // 平滑滚动到第一个更新的 card
+          if (firstCard) {
+            setTimeout(() => firstCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 50);
+          }
+          justUpdatedDays = new Set();
+        }
+      } catch(e) { console.error('renderPanel error:', e); }
     } catch(e) {
       console.error('updateFromTripBook error:', e);
     }
@@ -190,8 +242,11 @@ function renderPanel() {
   // ── Section 2: 每日行程（含航班、酒店、交通等所有 segments） ──
   html += renderSectionItinerary();
 
-  // ── Section 3: 预算（仅在行程总结阶段展示） ──
+  // ── Section 3: 预算（有数据就展示） ──
   html += renderSectionBudget();
+
+  // ── Section 4: 行前准备（有数据就展示） ──
+  html += renderSectionChecklist();
 
   body.innerHTML = html;
   body.scrollTop = 0;
@@ -207,7 +262,12 @@ function renderSectionHeader() {
     html += `<div class="itin-dest-title">${escItinHtml(s.destination)}</div>`;
   }
 
-  // 路线（唯一出现位置）
+  // 旅行主题
+  if (s.theme) {
+    html += `<div class="itin-theme">${escItinHtml(s.theme)}</div>`;
+  }
+
+  // 路线
   if (s.route && s.route.length > 0) {
     const stops = s.route.map((city, i) => {
       const isLast = i === s.route.length - 1;
@@ -216,32 +276,23 @@ function renderSectionHeader() {
     html += `<div class="itin-route-bar">${stops}</div>`;
   }
 
-  // 信息 grid（纯展示）
-  const infoItems = [];
+  // 信息条（紧凑单行）
+  const infoParts = [];
   if (s.dates || s.days) {
     const dateStr = s.dates ? escItinHtml(s.dates) : '';
-    const daysSuffix = s.days ? (dateStr ? `(${s.days}天)` : `${s.days}天`) : '';
-    infoItems.push({ icon: '📅', value: dateStr + daysSuffix });
-  }
-  if (s.people) {
-    infoItems.push({ icon: '👥', value: `${s.people}人` });
-  }
-  if (s.budget) {
-    infoItems.push({ icon: '💰', value: escItinHtml(s.budget) });
-  }
-  if (s.departCity) {
-    infoItems.push({ icon: '🛫', value: escItinHtml(s.departCity) });
-  }
-
-  if (infoItems.length > 0) {
-    html += '<div class="itin-info-grid">';
-    for (const item of infoItems) {
-      html += `<div class="itin-info-item">
-        <span class="itin-icon">${item.icon}</span>
-        <span class="itin-info-text">${item.value}</span>
-      </div>`;
+    const daysSuffix = s.days ? `${s.days}天` : '';
+    if (dateStr && daysSuffix) {
+      infoParts.push(`📅 ${dateStr} · ${daysSuffix}`);
+    } else {
+      infoParts.push(`📅 ${dateStr || daysSuffix}`);
     }
-    html += '</div>';
+  }
+  if (s.people) infoParts.push(`👥 ${s.people}人`);
+  if (s.budget) infoParts.push(`💰 ${escItinHtml(s.budget)}`);
+  if (s.departCity) infoParts.push(`🛫 ${escItinHtml(s.departCity)}出发`);
+
+  if (infoParts.length > 0) {
+    html += `<div class="itin-info-row">${infoParts.join('<span class="itin-info-sep">·</span>')}</div>`;
   }
 
   // 偏好标签
@@ -250,31 +301,60 @@ function renderSectionHeader() {
     html += `<div class="itin-tags-bar">${tagsHtml}</div>`;
   }
 
-  // 阶段状态（纯文字描述：当前在做什么 + 下一步做什么）
+  // 进度条
   if (s.phase > 0) {
-    const PHASE_DESCS = [
-      '',
-      '正在了解你的需求和约束条件',
-      '正在规划大交通和行程框架',
-      '正在填充每日景点、美食和住宿',
-      '行程规划完成'
-    ];
-    const NEXT_HINTS = [
-      '',
-      '接下来将规划大交通和行程框架',
-      '接下来将填充每日详细安排',
-      '接下来将生成行程总结和预算',
-      ''
-    ];
-    const current = PHASE_DESCS[s.phase] || '';
-    const next = NEXT_HINTS[s.phase] || '';
-    let statusHtml = `<span class="itin-phase-current">${escItinHtml(current)}</span>`;
-    if (next) {
-      statusHtml += `<span class="itin-phase-next">${escItinHtml(next)}</span>`;
-    }
-    html += `<div class="itin-phase-status">${statusHtml}</div>`;
+    html += renderProgressBar(s.phase);
   }
 
+  return html;
+}
+
+// ── 阶段进度条 ──
+function renderProgressBar(phase) {
+  const steps = [
+    { label: '了解需求', done: '需求已确认 ✓', active: '了解你的出行需求...' },
+    { label: '规划框架', done: '框架已确定 ✓', active: '规划交通和行程框架...' },
+    { label: '完善详情', done: '详情已完善 ✓', active: '完善每日景点和住宿...' },
+    { label: '行程总结', done: '规划完成 🎉', active: '生成预算和行前准备...' },
+  ];
+
+  // 找到当前激活步骤的描述文案
+  const activeStep = steps[phase - 1];
+  const statusText = phase <= 4
+    ? (phase === 4 && activeStep ? activeStep.done : (activeStep ? activeStep.active : ''))
+    : '';
+
+  let html = '<div class="itin-progress">';
+
+  // 步骤条：紧凑的胶囊式横排
+  html += '<div class="itin-progress-steps">';
+  for (let i = 0; i < steps.length; i++) {
+    const stepNum = i + 1;
+    const isDone = stepNum < phase;
+    const isActive = stepNum === phase;
+    const isFinal = phase === 4 && stepNum === 4; // 最终完成态
+
+    let cls = 'itin-step';
+    if (isDone || isFinal) cls += ' done';
+    else if (isActive) cls += ' active';
+
+    html += `<div class="${cls}">`;
+    if (isDone || isFinal) {
+      html += `<span class="itin-step-icon">✓</span>`;
+    } else if (isActive) {
+      html += `<span class="itin-step-dot"></span>`;
+    }
+    html += `<span class="itin-step-text">${steps[i].label}</span>`;
+    html += `</div>`;
+  }
+  html += '</div>';
+
+  // 状态描述：紧贴在步骤条下方
+  if (statusText) {
+    html += `<div class="itin-progress-hint">${escItinHtml(statusText)}</div>`;
+  }
+
+  html += '</div>';
   return html;
 }
 
@@ -282,23 +362,65 @@ function renderSectionHeader() {
 function renderSectionItinerary() {
   const s = itineraryState;
   if (!s.daysPlan || s.daysPlan.length === 0) return '';
-  return `<section class="panel-section">
-    <div class="panel-section-header">📅 每日行程</div>
+  return `<div class="itin-divider"></div>
+  <section class="panel-section">
+    <div class="panel-section-header">每日行程</div>
     ${renderDaysPlan(s.daysPlan)}
   </section>`;
 }
 
-// ── Section 3: 预算（仅在行程总结阶段展示） ──
+// ── Section 3: 预算（有数据就展示） ──
 function renderSectionBudget() {
   const s = itineraryState;
-
-  // 仅在行程总结阶段（phase >= 4）且有详细预算拆解时才展示
-  if (s.phase < 4 || !s.budgetSummary || !s.budgetSummary.total_cny) return '';
+  if (!s.budgetSummary || !s.budgetSummary.total_cny) return '';
 
   return `<section class="panel-section">
-    <div class="panel-section-header">💰 预算详情</div>
+    <div class="panel-section-header">💰 预算概览</div>
     ${renderBudgetSummary(s.budgetSummary)}
   </section>`;
+}
+
+// ── Section 4: 行前准备（reminders + practicalInfo） ──
+function renderSectionChecklist() {
+  const s = itineraryState;
+  const hasReminders = s.reminders && s.reminders.length > 0;
+  const hasPractical = s.practicalInfo && s.practicalInfo.length > 0;
+  if (!hasReminders && !hasPractical) return '';
+
+  let html = '<section class="panel-section">';
+  html += '<div class="panel-section-header">📋 行前准备</div>';
+
+  // 实用信息
+  if (hasPractical) {
+    html += '<div class="itin-practical">';
+    for (const item of s.practicalInfo) {
+      const icon = item.icon || 'ℹ️';
+      html += `<div class="itin-practical-item">
+        <span class="itin-practical-icon">${icon}</span>
+        <div class="itin-practical-body">
+          <div class="itin-practical-cat">${escItinHtml(item.category)}</div>
+          <div class="itin-practical-text">${escItinHtml(item.content)}</div>
+        </div>
+      </div>`;
+    }
+    html += '</div>';
+  }
+
+  // 行前清单
+  if (hasReminders) {
+    html += '<div class="itin-reminders">';
+    html += '<div class="itin-reminders-title">出发前记得</div>';
+    for (const r of s.reminders) {
+      html += `<div class="itin-reminder-item">
+        <span class="itin-reminder-check">☐</span>
+        <span>${escItinHtml(r)}</span>
+      </div>`;
+    }
+    html += '</div>';
+  }
+
+  html += '</section>';
+  return html;
 }
 
 // ============================================================

@@ -85,7 +85,8 @@
       "Bash(sed -i '' \"297s/（等 token 到来时会被替换）/\\(等 token 到来时会显示\\)/\" public/js/chat.js)",
       "Bash(sed -n '584p' /Users/geraldhuang/DEV/ai-travel-planner/server.js)",
       "Bash(sed -n '640,645p' /Users/geraldhuang/DEV/ai-travel-planner/server.js)",
-      "Bash(sed -n '668,675p' /Users/geraldhuang/DEV/ai-travel-planner/server.js)"
+      "Bash(sed -n '668,675p' /Users/geraldhuang/DEV/ai-travel-planner/server.js)",
+      "Bash(du -h /Users/geraldhuang/DEV/ai-travel-planner/EXPLORATION_*.* /Users/geraldhuang/DEV/ai-travel-planner/PROJECT_EXPLORATION_REPORT.md)"
     ]
   }
 }

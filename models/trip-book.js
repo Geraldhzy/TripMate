@@ -44,9 +44,12 @@ class TripBook {
     this.itinerary = {
       phase: 0,
       phaseLabel: '',
+      theme: '',              // 旅行主题（如"海岛潜水·城市探索之旅"）
       route: [],            // ["东京", "京都", "大阪"]
       days: [],             // [{ day, date, city, title, segments[] }]
       budgetSummary: null,  // { flights, hotels, ..., total_cny, budget_cny, remaining_cny }
+      reminders: [],        // ["出发前完成Visit Japan Web注册", ...]
+      practicalInfo: [],    // [{ category, content, icon }]
     };
   }
 
@@ -77,12 +80,6 @@ class TripBook {
     );
     const record = { ...entry, fetched_at: Date.now() };
     if (idx >= 0) {
-      const existing = this.itinerary.days[idx];
-      if (process.env.DEBUG_MERGE) {
-        const existingTitles = existing.segments?.map(s => `${s.time}|${s.title || s.activity || '?'}`) || [];
-        const newTitles = newDay.segments?.map(s => `${s.time}|${s.title || s.activity || '?'}`) || [];
-        console.log(`[MERGE] Day ${newDay.day}:`, { existingCount: existingTitles.length, newCount: newTitles.length, existingTitles, newTitles, replace: newDay._replace });
-      }
       this.dynamic.webSearches[idx] = record;
     } else {
       this.dynamic.webSearches.push(record);
@@ -156,56 +153,31 @@ class TripBook {
       this.itinerary.route = delta.route;
     }
 
+    if (typeof delta.theme === 'string' && delta.theme.trim()) {
+      this.itinerary.theme = delta.theme.trim();
+    }
+
     if (Array.isArray(delta.days)) {
       for (const newDay of delta.days) {
         const idx = this.itinerary.days.findIndex(d => d.day === newDay.day);
         if (idx >= 0) {
+          // 已有该天 → 整天替换策略
+          // day 级元数据（date, city, title 等）合并覆盖
           const existing = this.itinerary.days[idx];
-          if (process.env.DEBUG_MERGE) {
-            const existingTitles = existing.segments?.map(s => `${s.time}|${s.title || s.activity || '?'}`) || [];
-            const newTitles = newDay.segments?.map(s => `${s.time}|${s.title || s.activity || '?'}`) || [];
-            console.log(`[MERGE] Day ${newDay.day}:`, { existingCount: existingTitles.length, newCount: newTitles.length, existingTitles, newTitles, replace: newDay._replace });
-          }
           const merged = { ...existing, ...newDay };
 
-          // segments 智能合并：
-          // 1. 新数据没传 segments 或传了空数组 → 保留原有 segments
-          // 2. 新数据传了 segments 且设置了 _replace: true → 完全替换
-          // 3. 新数据传了 segments（非空）→ 按 time+title 去重合并
-          if (!newDay.segments || newDay.segments.length === 0) {
+          // segments：AI 每次发送该天的完整 segments 列表，直接替换
+          // 仅当 AI 没传 segments（只更新 title/city 等元数据）时，保留原有 segments
+          if (!newDay.segments) {
             merged.segments = existing.segments || [];
-          } else if (newDay._replace) {
+          } else {
             merged.segments = newDay.segments;
-          } else if (existing.segments?.length > 0) {
-            // VALIDATION: Check segment data integrity
-            if (!Array.isArray(newDay.segments)) {
-              console.warn(`[WARN] Invalid segments for day ${newDay.day}: not an array`, newDay.segments);
-              merged.segments = existing.segments || [];
-            } else {
-              // 去重合并：用 time+title 作为唯一标识
-              const existingMap = new Map();
-              for (const seg of existing.segments) {
-                const key = `${seg.time || ''}|${seg.title || seg.activity || ''}`;
-                existingMap.set(key, seg);
-              }
-              for (const seg of newDay.segments) {
-                const key = `${seg.time || ''}|${seg.title || seg.activity || ''}`;
-                // Validate segment has at least time or title
-                if (!key.includes('|') || key === '|') {
-                  console.warn(`[WARN] Segment missing time or title for day ${newDay.day}:`, seg);
-                }
-                existingMap.set(key, { ...(existingMap.get(key) || {}), ...seg });
-              }
-              merged.segments = Array.from(existingMap.values())
-                .sort((a, b) => (a.time || '').localeCompare(b.time || ''));
-            }
           }
-          delete merged._replace;
+
           this.itinerary.days[idx] = merged;
         } else {
-          const cleaned = { ...newDay };
-          delete cleaned._replace;
-          this.itinerary.days.push(cleaned);
+          // 新天 → 直接添加
+          this.itinerary.days.push({ ...newDay });
         }
       }
       this.itinerary.days.sort((a, b) => a.day - b.day);
@@ -213,6 +185,22 @@ class TripBook {
 
     if (delta.budgetSummary) {
       this.itinerary.budgetSummary = { ...this.itinerary.budgetSummary, ...delta.budgetSummary };
+    }
+
+    if (Array.isArray(delta.reminders) && delta.reminders.length > 0) {
+      this.itinerary.reminders = delta.reminders;
+    }
+
+    if (Array.isArray(delta.practicalInfo) && delta.practicalInfo.length > 0) {
+      // 按 category 覆盖更新
+      const map = new Map();
+      for (const item of this.itinerary.practicalInfo) {
+        map.set(item.category, item);
+      }
+      for (const item of delta.practicalInfo) {
+        map.set(item.category, item);
+      }
+      this.itinerary.practicalInfo = Array.from(map.values());
     }
   }
 
@@ -307,20 +295,24 @@ class TripBook {
       parts.push(`预算使用: ¥${it.budgetSummary.total_cny} / ¥${it.budgetSummary.budget_cny || '?'}`);
     }
 
-    // 注入每日行程摘要（让 LLM 知道已有行程，变更时不会丢失）
+    // 注入每日行程详情（让 LLM 看到完整 segments，修改时在此基础上重新生成该天完整列表）
     if (it.days.length > 0) {
       parts.push('');
-      parts.push('## 已有每日行程（变更时只传需修改的天数，未提及的天保持不变）');
+      parts.push('## 已有每日行程（修改某天时，传入该天完整 segments；未提及的天保持不变）');
       for (const day of it.days) {
         const segs = day.segments || [];
         if (segs.length === 0) {
-          parts.push(`- Day ${day.day}（${day.date || ''}）${day.city || ''} — ${day.title || '待安排'}`);
+          parts.push(`### Day ${day.day}（${day.date || ''}）${day.city || ''} — ${day.title || '待安排'}`);
+          parts.push('  暂无 segments');
         } else {
-          const segSummary = segs.map(s => {
+          parts.push(`### Day ${day.day}（${day.date || ''}）${day.city || ''} — ${day.title || ''}`);
+          for (const s of segs) {
             const time = s.time ? `${s.time} ` : '';
-            return `${time}${s.title || s.activity || ''}`;
-          }).join(' → ');
-          parts.push(`- Day ${day.day}（${day.date || ''}）${day.city || ''} — ${day.title || ''}: ${segSummary}`);
+            const type = s.type ? `[${s.type}]` : '';
+            const loc = s.location ? ` · ${s.location}` : '';
+            const notes = s.notes ? ` · ${s.notes}` : '';
+            parts.push(`  - ${time}${s.title || s.activity || ''}${type}${loc}${notes}`);
+          }
         }
       }
     }
@@ -385,6 +377,7 @@ class TripBook {
     return {
       destination: destStr,
       departCity: c.departCity?.value || '',
+      theme: it.theme || '',
       dates: c.dates ? (c.dates.start ? `${c.dates.start} ~ ${c.dates.end}` : '') : '',
       days: c.dates?.days || 0,
       people: c.people?.count || 0,
@@ -406,6 +399,8 @@ class TripBook {
           nights: h.nights, status: h.status,
         })),
       budgetSummary: it.budgetSummary,
+      reminders: it.reminders || [],
+      practicalInfo: it.practicalInfo || [],
       daysPlan: it.days.map(d => ({
         day: d.day, date: d.date, city: d.city, title: d.title,
         segments: (d.segments || []).map(seg => ({

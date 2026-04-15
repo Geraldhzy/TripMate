@@ -183,8 +183,59 @@ function getToolResultLabel(funcName, funcArgs, resultStr) {
         const count = Array.isArray(data.results) ? data.results.length : (Array.isArray(data) ? data.length : 0);
         return `找到 ${count} 个地点`;
       }
+      case 'search_hotels': {
+        const count = Array.isArray(data.hotels) ? data.hotels.length : 0;
+        const city = funcArgs.city || '';
+        return count > 0 ? `找到 ${count} 家${city ? ' ' + city : ''}酒店` : '暂无酒店结果';
+      }
+      case 'search_flights': {
+        const count = Array.isArray(data.flights) ? data.flights.length : 0;
+        return count > 0 ? `找到 ${count} 个航班` : '暂无航班结果';
+      }
       case 'update_trip_info': {
-        return data.message || null;
+        // 从工具入参 + 工具返回结果两个来源推断用户友好的描述
+        const parts = [];
+        const args = funcArgs || {};
+        // 优先从工具返回结果中的 updates 获取（更可靠）
+        const updates = data.updates || {};
+        const constraints = args.constraints || updates.constraints;
+        const itinerary = args.itinerary || updates.itinerary;
+        const phase = args.phase !== undefined ? args.phase : updates.phase;
+
+        if (constraints) {
+          const fields = Object.keys(constraints).filter(k => k !== '_reason');
+          const LABELS = { destination: '目的地', departCity: '出发城市', dates: '出行时间', people: '人数', budget: '预算', preferences: '偏好' };
+          const names = fields.map(f => LABELS[f] || f).slice(0, 3);
+          if (names.length > 0) parts.push(`已记录${names.join('、')}${fields.length > 3 ? '等信息' : ''}`);
+        }
+        if (itinerary) {
+          if (itinerary.days && Array.isArray(itinerary.days)) {
+            const dayNums = itinerary.days.map(d => d.day).filter(Boolean);
+            if (dayNums.length > 0) {
+              // 连续天数用范围表示：Day 1-10，非连续用逗号：Day 1、3、5
+              const sorted = dayNums.sort((a, b) => a - b);
+              let dayStr;
+              if (sorted.length >= 3 && sorted[sorted.length - 1] - sorted[0] === sorted.length - 1) {
+                dayStr = `Day ${sorted[0]}-${sorted[sorted.length - 1]}`;
+              } else {
+                dayStr = `Day ${sorted.join('、')}`;
+              }
+              parts.push(`已更新 ${dayStr} 行程`);
+            } else {
+              parts.push('行程已更新');
+            }
+          } else if (itinerary.route) {
+            parts.push('路线已规划');
+          }
+          if (itinerary.theme) parts.push('主题已设定');
+          if (itinerary.budgetSummary) parts.push('预算已生成');
+          if (itinerary.reminders || itinerary.practicalInfo) parts.push('行前准备已更新');
+        }
+        if (parts.length === 0 && phase !== undefined) {
+          const PHASE_NAMES = { 1: '需求确认完成', 2: '框架规划中', 3: '详情完善中', 4: '行程总结中' };
+          parts.push(PHASE_NAMES[phase] || '阶段已更新');
+        }
+        return parts.length > 0 ? parts.join('，') : '行程信息已同步';
       }
       default:
         return null;
@@ -218,13 +269,13 @@ async function runTool(funcName, funcArgs, toolId, sendSSE, tripBook, delegateCt
       );
       toolTimer.done({ resultLen: resultStr.length });
 
-      // 动态生成 resultLabel：根据实际返回的子 Agent 结果汇总
-      let delegateLabel = '委派完成';
+      // 动态生成 resultLabel
+      let delegateLabel = '信息搜集完成';
       try {
         const parsed = JSON.parse(resultStr);
         if (parsed.results && Array.isArray(parsed.results)) {
           const labels = parsed.results.map(r => {
-            const agentLabel = r.agent === 'flight' ? '✈️ 机票搜索' : r.agent === 'research' ? '📋 目的地调研' : r.agent;
+            const agentLabel = r.agent === 'flight' ? '✈️ 机票查询' : r.agent === 'research' ? '📋 目的地调研' : r.agent;
             return r.status === 'success' ? `${agentLabel}完成` : `${agentLabel}失败`;
           });
           delegateLabel = labels.join(' · ');
@@ -235,7 +286,7 @@ async function runTool(funcName, funcArgs, toolId, sendSSE, tripBook, delegateCt
     } catch (err) {
       toolLog.error('委派执行失败', { error: err.message, stack: err.stack });
       const errMsg = `delegate_to_agents 执行失败: ${err.message}`;
-      sendSSE('tool_result', { id: toolId, name: funcName, resultLabel: '委派执行失败' });
+      sendSSE('tool_result', { id: toolId, name: funcName, resultLabel: '信息搜集失败，请重试' });
       return errMsg;
     }
   }
@@ -370,7 +421,7 @@ function withTimeout(promise, ms, label = 'operation') {
   return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timeoutId));
 }
 
-const LLM_TIMEOUT_MS = 120000;
+const LLM_TIMEOUT_MS = 300000;
 const TOOL_TIMEOUT_MS = 30000;
 
 // ============================================================
@@ -620,7 +671,7 @@ async function handleChat(apiKey, model, systemPrompt, userMessages, sendSSE, ba
 
   const messages = [{ role: 'system', content: systemPrompt }, ...userMessages];
 
-  const MAX_TOOL_ROUNDS = 10;
+  const MAX_TOOL_ROUNDS = 30;
   let delegationCount = 0;
   const delegatedAgents = new Set(); // 记录已成功委派过的 agent 类型，防止重复委派
   let pendingCoverMsg = null; // coveredTopics 消息暂存，等 tool 消息全部 push 后再注入
@@ -642,6 +693,16 @@ async function handleChat(apiKey, model, systemPrompt, userMessages, sendSSE, ba
       // 过滤可能泄露的 function call JSON 片段
       const safeText = sanitizeLLMOutput(fullText);
       sendSSE('token', { text: safeText });
+
+      // 最终输出时检查 phase 是否需要推进（LLM 可能在文本中输出预算但没调工具）
+      try {
+        const curPhase = (tripBook.itinerary && tripBook.itinerary.phase) || 0;
+        if (curPhase < 4 && tripBook.itinerary.budgetSummary && tripBook.itinerary.budgetSummary.total_cny) {
+          tripBook.updatePhase(4);
+          sendSSE('tripbook_update', { ...tripBook.toPanelData(), _snapshot: tripBook.toJSON() });
+        }
+      } catch {}
+
       return safeText;
     }
 
@@ -741,6 +802,27 @@ ${delegResult._instruction || ''}`.trim();
         inferredPhase = 2;
       } else if (currentPhase < 3 && toolNames.some(n => ['search_hotels', 'search_poi'].includes(n))) {
         inferredPhase = 3;
+      }
+
+      // phase 4 自动推进：多种触发条件
+      if (currentPhase < 4) {
+        // 条件1: TripBook 已有 budgetSummary（工具执行后已同步）
+        if (tripBook.itinerary.budgetSummary && tripBook.itinerary.budgetSummary.total_cny) {
+          inferredPhase = 4;
+        }
+        // 条件2: LLM 主动传了 phase=4 或 budgetSummary
+        if (toolNames.includes('update_trip_info')) {
+          for (const tc of toolCalls) {
+            if (tc.name === 'update_trip_info') {
+              try {
+                const args = tc.args || {};
+                if (args.itinerary?.budgetSummary || args.phase === 4) {
+                  inferredPhase = 4;
+                }
+              } catch {}
+            }
+          }
+        }
       }
 
       if (inferredPhase > currentPhase) {
