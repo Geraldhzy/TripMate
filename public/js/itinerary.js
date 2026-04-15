@@ -33,6 +33,12 @@ const PHASE_LABELS = [
 ];
 
 // ============================================================
+// Debouncing for TripBook Updates - Prevents race conditions
+// ============================================================
+let updateTimeout = null;
+let pendingUpdateData = null;
+
+// ============================================================
 // TripBook 数据更新（从 tripbook_update SSE 事件）
 // ============================================================
 function updateItinerary(data) {
@@ -98,47 +104,63 @@ function clearItinerary() {
 // ============================================================
 function updateFromTripBook(data) {
   if (!data) return;
-  try {
-
-  if (data.destination) itineraryState.destination = data.destination;
-  if (data.departCity) itineraryState.departCity = data.departCity;
-  if (data.dates) itineraryState.dates = data.dates;
-  if (data.days) itineraryState.days = data.days;
-  if (data.people) itineraryState.people = data.people;
-  if (data.budget) itineraryState.budget = data.budget;
-  if (data.phase) {
-    itineraryState.phase = data.phase;
-    itineraryState.phaseLabel = PHASE_LABELS[data.phase] || '';
-  }
-  if (data.preferences && data.preferences.length > 0) {
-    itineraryState.preferences = data.preferences;
-  }
-  if (data.route && data.route.length > 0) {
-    itineraryState.route = data.route;
-  }
-  if (data.daysPlan && data.daysPlan.length > 0) {
-    itineraryState.daysPlan = data.daysPlan;
-  }
-  if (data.budgetSummary) {
-    itineraryState.budgetSummary = data.budgetSummary;
-  }
-  if (data.flights) {
-    itineraryState.flights = data.flights;
-  }
-  if (data.hotels) {
-    itineraryState.hotels = data.hotels;
-  }
-  if (data.weather) {
-    itineraryState.weather = data.weather;
-  }
-  if (data.weatherList) {
-    itineraryState.weatherList = data.weatherList;
-  }
-
-  try { renderPanel(); } catch(e) { console.error('renderPanel error:', e); }
-  } catch(e) {
-    console.error('updateFromTripBook error:', e);
-  }
+  
+  // Store pending data and debounce rendering to prevent race conditions
+  pendingUpdateData = data;
+  
+  // Clear any pending update timeout
+  if (updateTimeout) clearTimeout(updateTimeout);
+  
+  // Schedule update with 100ms debounce
+  updateTimeout = setTimeout(() => {
+    try {
+      const d = pendingUpdateData;
+      if (!d) return;
+      
+      if (d.destination) itineraryState.destination = d.destination;
+      if (d.departCity) itineraryState.departCity = d.departCity;
+      if (d.dates) itineraryState.dates = d.dates;
+      if (d.days) itineraryState.days = d.days;
+      if (d.people) itineraryState.people = d.people;
+      if (d.budget) itineraryState.budget = d.budget;
+      if (d.phase) {
+        itineraryState.phase = d.phase;
+        itineraryState.phaseLabel = PHASE_LABELS[d.phase] || '';
+      }
+      if (d.preferences && d.preferences.length > 0) {
+        itineraryState.preferences = d.preferences;
+      }
+      if (d.route && d.route.length > 0) {
+        itineraryState.route = d.route;
+      }
+      if (d.daysPlan && d.daysPlan.length > 0) {
+        itineraryState.daysPlan = d.daysPlan;
+      }
+      if (d.budgetSummary) {
+        itineraryState.budgetSummary = d.budgetSummary;
+      }
+      if (d.flights) {
+        itineraryState.flights = d.flights;
+      }
+      if (d.hotels) {
+        itineraryState.hotels = d.hotels;
+      }
+      if (d.weather) {
+        itineraryState.weather = d.weather;
+      }
+      if (d.weatherList) {
+        itineraryState.weatherList = d.weatherList;
+      }
+      
+      try { renderPanel(); } catch(e) { console.error('renderPanel error:', e); }
+    } catch(e) {
+      console.error('updateFromTripBook error:', e);
+    }
+    
+    // Clear pending data after processing
+    pendingUpdateData = null;
+    updateTimeout = null;
+  }, 100);
 }
 
 // ============================================================

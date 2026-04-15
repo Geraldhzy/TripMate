@@ -77,6 +77,12 @@ class TripBook {
     );
     const record = { ...entry, fetched_at: Date.now() };
     if (idx >= 0) {
+      const existing = this.itinerary.days[idx];
+      if (process.env.DEBUG_MERGE) {
+        const existingTitles = existing.segments?.map(s => `${s.time}|${s.title || s.activity || '?'}`) || [];
+        const newTitles = newDay.segments?.map(s => `${s.time}|${s.title || s.activity || '?'}`) || [];
+        console.log(`[MERGE] Day ${newDay.day}:`, { existingCount: existingTitles.length, newCount: newTitles.length, existingTitles, newTitles, replace: newDay._replace });
+      }
       this.dynamic.webSearches[idx] = record;
     } else {
       this.dynamic.webSearches.push(record);
@@ -155,6 +161,11 @@ class TripBook {
         const idx = this.itinerary.days.findIndex(d => d.day === newDay.day);
         if (idx >= 0) {
           const existing = this.itinerary.days[idx];
+          if (process.env.DEBUG_MERGE) {
+            const existingTitles = existing.segments?.map(s => `${s.time}|${s.title || s.activity || '?'}`) || [];
+            const newTitles = newDay.segments?.map(s => `${s.time}|${s.title || s.activity || '?'}`) || [];
+            console.log(`[MERGE] Day ${newDay.day}:`, { existingCount: existingTitles.length, newCount: newTitles.length, existingTitles, newTitles, replace: newDay._replace });
+          }
           const merged = { ...existing, ...newDay };
 
           // segments 智能合并：
@@ -166,18 +177,28 @@ class TripBook {
           } else if (newDay._replace) {
             merged.segments = newDay.segments;
           } else if (existing.segments?.length > 0) {
-            // 去重合并：用 time+title 作为唯一标识
-            const existingMap = new Map();
-            for (const seg of existing.segments) {
-              const key = `${seg.time || ''}|${seg.title || seg.activity || ''}`;
-              existingMap.set(key, seg);
+            // VALIDATION: Check segment data integrity
+            if (!Array.isArray(newDay.segments)) {
+              console.warn(`[WARN] Invalid segments for day ${newDay.day}: not an array`, newDay.segments);
+              merged.segments = existing.segments || [];
+            } else {
+              // 去重合并：用 time+title 作为唯一标识
+              const existingMap = new Map();
+              for (const seg of existing.segments) {
+                const key = `${seg.time || ''}|${seg.title || seg.activity || ''}`;
+                existingMap.set(key, seg);
+              }
+              for (const seg of newDay.segments) {
+                const key = `${seg.time || ''}|${seg.title || seg.activity || ''}`;
+                // Validate segment has at least time or title
+                if (!key.includes('|') || key === '|') {
+                  console.warn(`[WARN] Segment missing time or title for day ${newDay.day}:`, seg);
+                }
+                existingMap.set(key, { ...(existingMap.get(key) || {}), ...seg });
+              }
+              merged.segments = Array.from(existingMap.values())
+                .sort((a, b) => (a.time || '').localeCompare(b.time || ''));
             }
-            for (const seg of newDay.segments) {
-              const key = `${seg.time || ''}|${seg.title || seg.activity || ''}`;
-              existingMap.set(key, { ...(existingMap.get(key) || {}), ...seg });
-            }
-            merged.segments = Array.from(existingMap.values())
-              .sort((a, b) => (a.time || '').localeCompare(b.time || ''));
           }
           delete merged._replace;
           this.itinerary.days[idx] = merged;

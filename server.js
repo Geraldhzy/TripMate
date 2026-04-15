@@ -569,7 +569,17 @@ async function streamOpenAI(client, model, messages, tools, sendSSE, silent = fa
   let rawToolCalls = Object.values(toolCallsMap);
   let toolCalls = rawToolCalls.map(tc => {
     let args;
-    try { args = JSON.parse(tc.function.arguments); } catch { args = {}; }
+    try { 
+      args = JSON.parse(tc.function.arguments); 
+    } 
+    catch (e) { 
+      log.error('[STREAM] JSON.parse failed for tool', {
+        toolName: tc.function.name,
+        error: e.message,
+        argumentsPreview: tc.function.arguments ? tc.function.arguments.slice(0, 200) : 'undefined'
+      });
+      args = {}; 
+    }
     return { id: tc.id, name: tc.function.name, args };
   });
 
