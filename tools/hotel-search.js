@@ -19,6 +19,13 @@ const TOOL_DEF = {
 };
 
 function execute(params) {
+  // 参数名兼容：tool definition 用 checkin/checkout，但 LLM 可能传 check_in/check_out
+  const normalized = {
+    city: params.city || '',
+    checkin: params.checkin || params.check_in || '',
+    checkout: params.checkout || params.check_out || ''
+  };
+
   return new Promise((resolve) => {
     const scriptPath = path.join(__dirname, 'scripts', 'search_hotels.py');
     const child = spawn('python3', [scriptPath], {
@@ -53,7 +60,7 @@ function execute(params) {
       resolve(JSON.stringify({ error: `无法启动Python: ${err.message}` }));
     });
 
-    child.stdin.write(JSON.stringify(params));
+    child.stdin.write(JSON.stringify(normalized));
     child.stdin.end();
   });
 }

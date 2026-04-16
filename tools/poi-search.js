@@ -1,125 +1,71 @@
 /**
- * POI搜索工具 — 使用 Overpass API (OpenStreetMap，免费无需Key)
+ * POI搜索工具 — 封装 web_search 搜索地点信息
+ * 由于搜索引擎在部分网络环境下不稳定，此工具做了多次重试和查询优化
  */
-const https = require('https');
+const { execute: webSearch } = require('./web-search');
 
 const TOOL_DEF = {
   name: 'search_poi',
-  description: '搜索地点信息，如餐厅、景点、ATM、潜水店等。返回名称、地址、坐标、评分等信息。',
+  description: '搜索地点信息，如餐厅、景点、ATM、潜水店等。返回名称、地址、简介等信息。',
   parameters: {
     type: 'object',
     properties: {
-      query: { type: 'string', description: '搜索关键词，如"Semporna dive shop"、"Kuala Lumpur restaurant"' },
-      location: { type: 'string', description: '地点名称（英文），如 Kuala Lumpur, Semporna' },
+      query: { type: 'string', description: '搜索关键词，如"Semporna dive shop"、"浅草寺 门票 开放时间"' },
+      location: { type: 'string', description: '地点名称，如 Kuala Lumpur, 东京, Semporna' },
       category: { type: 'string', description: '类别：restaurant, attraction, hotel, atm, dive_shop, cafe, shopping', default: 'attraction' }
     },
     required: ['query', 'location']
   }
 };
 
-// 用 Nominatim 做地理编码
-function geocode(location) {
-  return new Promise((resolve, reject) => {
-    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(location)}&format=json&limit=1`;
-    https.get(url, {
-      headers: { 'User-Agent': 'AITravelPlanner/1.0' },
-      timeout: 10000
-    }, (res) => {
-      let data = '';
-      res.on('data', c => data += c);
-      res.on('end', () => {
-        try {
-          const results = JSON.parse(data);
-          if (results.length > 0) {
-            resolve({ lat: parseFloat(results[0].lat), lon: parseFloat(results[0].lon) });
-          } else {
-            reject(new Error(`无法定位: ${location}`));
-          }
-        } catch { reject(new Error('地理编码解析失败')); }
-      });
-    }).on('error', reject);
-  });
-}
-
-// Overpass 查询
-function overpassQuery(lat, lon, category, radius = 5000) {
-  const categoryMap = {
-    restaurant: '["amenity"="restaurant"]',
-    cafe: '["amenity"="cafe"]',
-    attraction: '["tourism"~"attraction|museum|viewpoint"]',
-    hotel: '["tourism"~"hotel|guest_house|hostel"]',
-    atm: '["amenity"="atm"]',
-    dive_shop: '["sport"="scuba_diving"]',
-    shopping: '["shop"~"mall|supermarket|department_store"]'
-  };
-
-  const filter = categoryMap[category] || '["tourism"="attraction"]';
-  const query = `[out:json][timeout:10];(node${filter}(around:${radius},${lat},${lon});way${filter}(around:${radius},${lat},${lon}););out center 10;`;
-
-  return new Promise((resolve, reject) => {
-    const postData = `data=${encodeURIComponent(query)}`;
-    const options = {
-      hostname: 'overpass-api.de',
-      path: '/api/interpreter',
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Content-Length': Buffer.byteLength(postData)
-      },
-      timeout: 15000
-    };
-
-    const req = https.request(options, (res) => {
-      let data = '';
-      res.on('data', c => data += c);
-      res.on('end', () => {
-        try { resolve(JSON.parse(data)); }
-        catch { reject(new Error('POI数据解析失败')); }
-      });
-    });
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('请求超时')); });
-    req.write(postData);
-    req.end();
-  });
-}
-
 async function execute({ query, location, category = 'attraction' }) {
-  try {
-    const coords = await geocode(location);
-    const data = await overpassQuery(coords.lat, coords.lon, category);
+  // 尝试多种查询策略
+  const queries = [
+    `${location} ${query} guide tips`,          // 英文通用
+    `${query} ${location} 攻略 推荐`,            // 中文
+    `${location} ${query} travel information`,   // 英文备用
+  ];
 
-    const pois = (data.elements || []).map(el => {
-      const tags = el.tags || {};
-      return {
-        name: tags.name || tags['name:en'] || tags['name:zh'] || '未命名',
-        lat: el.lat || el.center?.lat,
-        lon: el.lon || el.center?.lon,
-        category: category,
-        address: tags['addr:full'] || tags['addr:street'] || '',
-        phone: tags.phone || '',
-        website: tags.website || '',
-        opening_hours: tags.opening_hours || ''
-      };
-    }).filter(p => p.name !== '未命名');
+  for (const searchQuery of queries) {
+    try {
+      const lang = /[\u4e00-\u9fff]/.test(searchQuery) ? 'zh-CN' : 'en';
+      const rawResult = await webSearch({ query: searchQuery, language: lang });
+      const parsed = JSON.parse(rawResult);
 
-    // 按名称匹配度排序（简单关键词匹配）
-    const keywords = query.toLowerCase().split(/\s+/);
-    pois.sort((a, b) => {
-      const scoreA = keywords.filter(k => a.name.toLowerCase().includes(k)).length;
-      const scoreB = keywords.filter(k => b.name.toLowerCase().includes(k)).length;
-      return scoreB - scoreA;
-    });
+      if (parsed.results && parsed.results.length > 0) {
+        // 过滤明显不相关的结果（标题中完全不包含 query 或 location 的任何词）
+        const queryWords = `${query} ${location}`.toLowerCase().split(/\s+/).filter(w => w.length > 1);
+        const relevant = parsed.results.filter(r => {
+          const title = (r.title || '').toLowerCase();
+          const snippet = (r.snippet || '').toLowerCase();
+          const text = title + ' ' + snippet;
+          return queryWords.some(w => text.includes(w));
+        });
 
-    return JSON.stringify({
-      query,
-      location,
-      center: coords,
-      results: pois.slice(0, 10)
-    });
-  } catch (err) {
-    return JSON.stringify({ query, location, error: err.message });
+        if (relevant.length > 0) {
+          return JSON.stringify({
+            query, location, category,
+            results: relevant.map(r => ({
+              name: r.title || '',
+              url: r.url || '',
+              snippet: r.snippet || '',
+              category
+            })),
+            source: 'web_search'
+          });
+        }
+      }
+    } catch {
+      // 继续尝试下一个查询
+    }
   }
+
+  // 所有查询都失败
+  return JSON.stringify({
+    query, location, category,
+    results: [],
+    note: `未能搜索到 ${location} 的 ${query} 相关信息，建议直接使用 web_search 工具搜索`
+  });
 }
 
 module.exports = { TOOL_DEF, execute };

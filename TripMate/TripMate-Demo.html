@@ -1,0 +1,1252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TripMate · AI 旅行伴侣</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --coral: #FF6B47;
+      --coral-light: #FF8F70;
+      --coral-bg: #FFF4F1;
+      --navy: #1A1F3A;
+      --navy-mid: #2D3561;
+      --text: #1A1F3A;
+      --text-mid: #5A607A;
+      --text-light: #9BA3BB;
+      --border: #ECEEF5;
+      --white: #FFFFFF;
+      --green: #34C759;
+      --blue: #007AFF;
+      --yellow: #FFD60A;
+      --purple: #AF52DE;
+    }
+
+    body {
+      font-family: -apple-system, 'SF Pro Display', 'PingFang SC', 'Noto Sans SC', sans-serif;
+      background: #F8F9FC;
+      color: var(--text);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Hero ── */
+    .hero {
+      background: linear-gradient(150deg, var(--navy) 0%, var(--navy-mid) 60%, #3D4A8A 100%);
+      padding: 80px 24px 100px;
+      text-align: center;
+      position: relative;
+      overflow: hidden;
+    }
+    .hero::before {
+      content: '';
+      position: absolute;
+      width: 500px; height: 500px;
+      border-radius: 50%;
+      background: rgba(255,107,71,0.12);
+      top: -150px; right: -100px;
+    }
+    .hero::after {
+      content: '';
+      position: absolute;
+      width: 300px; height: 300px;
+      border-radius: 50%;
+      background: rgba(255,107,71,0.08);
+      bottom: -80px; left: -60px;
+    }
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(255,107,71,0.2);
+      border: 1px solid rgba(255,107,71,0.4);
+      color: #FF9070;
+      font-size: 13px;
+      font-weight: 600;
+      padding: 6px 14px;
+      border-radius: 20px;
+      margin-bottom: 28px;
+      letter-spacing: 0.3px;
+    }
+    .hero h1 {
+      font-size: clamp(36px, 6vw, 64px);
+      font-weight: 800;
+      color: white;
+      line-height: 1.1;
+      margin-bottom: 20px;
+      letter-spacing: -0.5px;
+    }
+    .hero h1 span { color: var(--coral-light); }
+    .hero p {
+      font-size: 18px;
+      color: rgba(255,255,255,0.65);
+      max-width: 540px;
+      margin: 0 auto 48px;
+      line-height: 1.7;
+    }
+    .hero-dots {
+      display: flex;
+      justify-content: center;
+      gap: 8px;
+      margin-top: 40px;
+    }
+    .hero-dots span {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.3);
+    }
+    .hero-dots span.active { background: var(--coral-light); width: 20px; border-radius: 3px; }
+
+    /* ── Section layout ── */
+    .module {
+      padding: 80px 24px;
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+    .module:nth-child(odd) { background: white; max-width: 100%; }
+    .module:nth-child(odd) .module-inner { max-width: 1100px; margin: 0 auto; }
+    .module-inner {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 80px;
+      align-items: center;
+    }
+    .module-inner.reverse { direction: rtl; }
+    .module-inner.reverse > * { direction: ltr; }
+
+    .module-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      color: var(--coral);
+      background: var(--coral-bg);
+      padding: 5px 12px;
+      border-radius: 20px;
+      margin-bottom: 16px;
+    }
+    .module-title {
+      font-size: clamp(28px, 3.5vw, 40px);
+      font-weight: 800;
+      line-height: 1.2;
+      color: var(--navy);
+      margin-bottom: 16px;
+      letter-spacing: -0.3px;
+    }
+    .module-desc {
+      font-size: 16px;
+      color: var(--text-mid);
+      line-height: 1.75;
+      margin-bottom: 32px;
+    }
+    .feature-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .feature-list li {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      font-size: 15px;
+      color: var(--text-mid);
+      line-height: 1.5;
+    }
+    .feature-list li .icon {
+      width: 22px; height: 22px;
+      border-radius: 6px;
+      background: var(--coral-bg);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+    .feature-list li strong { color: var(--navy); }
+
+    /* ── iPhone Frame ── */
+    .phone-wrap {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+    .phone {
+      width: 280px;
+      background: var(--navy);
+      border-radius: 46px;
+      padding: 14px;
+      box-shadow:
+        0 40px 80px rgba(26,31,58,0.35),
+        0 0 0 1px rgba(255,255,255,0.08) inset,
+        0 0 0 2px rgba(0,0,0,0.5);
+      position: relative;
+    }
+    .phone-notch {
+      position: absolute;
+      top: 14px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 100px; height: 30px;
+      background: var(--navy);
+      border-radius: 0 0 18px 18px;
+      z-index: 10;
+    }
+    .phone-notch::after {
+      content: '';
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: #0A0E1F;
+    }
+    .phone-screen {
+      background: white;
+      border-radius: 34px;
+      overflow: hidden;
+      height: 560px;
+      position: relative;
+    }
+
+    /* ── Status Bar ── */
+    .status-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 14px 20px 4px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .status-bar .time { color: var(--navy); }
+    .status-bar .icons { color: var(--navy); display: flex; gap: 4px; }
+
+    /* ── SCREEN 1: Planning ── */
+    .screen-planning { background: #F8F9FC; }
+    .plan-header {
+      background: white;
+      padding: 8px 16px 14px;
+      border-bottom: 1px solid var(--border);
+    }
+    .plan-header h3 { font-size: 17px; font-weight: 700; color: var(--navy); }
+    .plan-header p { font-size: 12px; color: var(--text-light); margin-top: 2px; }
+    .plan-body { padding: 14px 14px 0; overflow: hidden; }
+    .dest-input {
+      background: white;
+      border-radius: 12px;
+      padding: 10px 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+      margin-bottom: 10px;
+    }
+    .dest-input .icon { font-size: 16px; }
+    .dest-input .val { font-size: 15px; font-weight: 600; color: var(--navy); }
+    .dest-input .meta { font-size: 11px; color: var(--text-light); margin-left: auto; }
+    .tags-row {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+    .tag {
+      font-size: 11px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      border: 1px solid var(--border);
+      color: var(--text-mid);
+      background: white;
+    }
+    .tag.active {
+      background: var(--navy);
+      color: white;
+      border-color: var(--navy);
+    }
+    .ai-thinking {
+      background: linear-gradient(135deg, #FF6B47, #FF9070);
+      border-radius: 12px;
+      padding: 10px 12px;
+      margin-bottom: 10px;
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+    }
+    .ai-thinking .bubble { font-size: 11px; color: white; line-height: 1.5; flex: 1; }
+    .ai-thinking .bubble strong { display: block; margin-bottom: 2px; font-size: 12px; }
+    .day-card {
+      background: white;
+      border-radius: 10px;
+      padding: 10px 12px;
+      margin-bottom: 6px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    }
+    .day-card-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 6px;
+    }
+    .day-badge {
+      background: var(--navy);
+      color: white;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 10px;
+    }
+    .day-theme { font-size: 12px; font-weight: 600; color: var(--navy); }
+    .poi-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 0;
+    }
+    .poi-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--coral); flex-shrink: 0; }
+    .poi-name { font-size: 11px; color: var(--text-mid); }
+    .poi-time { font-size: 10px; color: var(--text-light); margin-left: auto; }
+
+    /* ── SCREEN 2: Itinerary Preview ── */
+    .screen-itinerary { background: #F8F9FC; }
+    .itin-header {
+      background: var(--navy);
+      padding: 10px 16px 12px;
+      color: white;
+    }
+    .itin-header h3 { font-size: 15px; font-weight: 700; }
+    .itin-header p { font-size: 11px; color: rgba(255,255,255,0.6); margin-top: 2px; }
+    .map-preview {
+      height: 140px;
+      background: linear-gradient(135deg, #E8F4FD 0%, #D4EDF9 100%);
+      position: relative;
+      overflow: hidden;
+    }
+    .map-preview .map-bg {
+      position: absolute;
+      inset: 0;
+      background:
+        repeating-linear-gradient(0deg, rgba(0,122,255,0.04) 0, rgba(0,122,255,0.04) 1px, transparent 1px, transparent 40px),
+        repeating-linear-gradient(90deg, rgba(0,122,255,0.04) 0, rgba(0,122,255,0.04) 1px, transparent 1px, transparent 40px);
+    }
+    .map-route {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      width: 200px; height: 60px;
+    }
+    .map-route svg { width: 100%; height: 100%; }
+    .map-pin {
+      position: absolute;
+      font-size: 18px;
+      transform: translate(-50%, -100%);
+    }
+    .map-pin.p1 { top: 55%; left: 25%; }
+    .map-pin.p2 { top: 40%; left: 50%; }
+    .map-pin.p3 { top: 55%; left: 75%; }
+    .map-day-tabs {
+      display: flex;
+      gap: 0;
+      background: white;
+      padding: 0 14px;
+      border-bottom: 1px solid var(--border);
+    }
+    .map-day-tab {
+      font-size: 12px;
+      font-weight: 600;
+      padding: 8px 12px;
+      color: var(--text-light);
+      border-bottom: 2px solid transparent;
+    }
+    .map-day-tab.active { color: var(--coral); border-bottom-color: var(--coral); }
+    .timeline {
+      padding: 10px 14px;
+      overflow: hidden;
+    }
+    .tl-item {
+      display: flex;
+      gap: 10px;
+      position: relative;
+      padding-bottom: 10px;
+    }
+    .tl-item::before {
+      content: '';
+      position: absolute;
+      left: 15px;
+      top: 26px;
+      bottom: 0;
+      width: 1px;
+      background: var(--border);
+    }
+    .tl-item:last-child::before { display: none; }
+    .tl-num {
+      width: 22px; height: 22px;
+      border-radius: 50%;
+      background: var(--coral);
+      color: white;
+      font-size: 10px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .tl-num.done { background: #E5E7EF; color: var(--text-light); }
+    .tl-content { flex: 1; }
+    .tl-name { font-size: 13px; font-weight: 600; color: var(--navy); }
+    .tl-meta { font-size: 11px; color: var(--text-light); margin-top: 1px; }
+    .tl-transport {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 10px;
+      color: var(--blue);
+      background: #EEF5FF;
+      padding: 2px 8px;
+      border-radius: 10px;
+      width: fit-content;
+      margin: 4px 0 0 32px;
+    }
+
+    /* ── SCREEN 3: Trip Main ── */
+    .screen-trip { background: #1A1F3A; }
+    .trip-map {
+      height: 260px;
+      background: linear-gradient(180deg, #2A3060 0%, #1E2545 100%);
+      position: relative;
+      overflow: hidden;
+    }
+    .trip-map-grid {
+      position: absolute;
+      inset: 0;
+      background:
+        repeating-linear-gradient(0deg, rgba(255,255,255,0.03) 0, rgba(255,255,255,0.03) 1px, transparent 1px, transparent 50px),
+        repeating-linear-gradient(90deg, rgba(255,255,255,0.03) 0, rgba(255,255,255,0.03) 1px, transparent 1px, transparent 50px);
+    }
+    .trip-header-bar {
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      padding: 10px 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: linear-gradient(180deg, rgba(26,31,58,0.9) 0%, transparent 100%);
+    }
+    .trip-day-info { color: white; }
+    .trip-day-info .day { font-size: 11px; color: rgba(255,255,255,0.6); }
+    .trip-day-info .dest { font-size: 14px; font-weight: 700; }
+    .weather-chip {
+      background: rgba(255,255,255,0.12);
+      border-radius: 20px;
+      padding: 4px 10px;
+      font-size: 11px;
+      color: rgba(255,255,255,0.8);
+      display: flex; align-items: center; gap: 4px;
+    }
+    .map-pin-dark {
+      position: absolute;
+      font-size: 20px;
+      transform: translate(-50%, -100%);
+    }
+    .map-pin-dark.current {
+      font-size: 14px;
+      background: var(--coral);
+      color: white;
+      padding: 3px 8px;
+      border-radius: 10px;
+      transform: translate(-50%, -120%);
+      font-weight: 700;
+    }
+    .map-pin-dark.current::after {
+      content: '';
+      position: absolute;
+      bottom: -4px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 0; height: 0;
+      border-left: 4px solid transparent;
+      border-right: 4px solid transparent;
+      border-top: 4px solid var(--coral);
+    }
+    .map-pin-dark.p1 { top: 60%; left: 30%; }
+    .map-pin-dark.p2 { top: 45%; left: 55%; }
+    .map-pin-dark.p3 { top: 65%; left: 72%; }
+    .next-card {
+      background: white;
+      margin: -18px 12px 0;
+      border-radius: 14px;
+      padding: 12px 14px;
+      position: relative;
+      z-index: 2;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+    }
+    .next-card .label { font-size: 10px; color: var(--text-light); font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; }
+    .next-card .name { font-size: 15px; font-weight: 700; color: var(--navy); margin-top: 2px; }
+    .next-card .info { display: flex; gap: 8px; margin-top: 4px; }
+    .next-card .info span { font-size: 11px; color: var(--text-mid); display: flex; align-items: center; gap: 3px; }
+    .trip-bottom {
+      background: #1A1F3A;
+      padding: 12px 14px 16px;
+      margin-top: 12px;
+    }
+    .record-btns {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .rec-btn {
+      flex: 1;
+      background: rgba(255,255,255,0.08);
+      border-radius: 12px;
+      padding: 10px 8px;
+      text-align: center;
+      color: white;
+      font-size: 10px;
+      font-weight: 600;
+    }
+    .rec-btn .rec-icon { font-size: 18px; display: block; margin-bottom: 3px; }
+    .ai-chat-bar {
+      background: rgba(255,255,255,0.1);
+      border-radius: 22px;
+      padding: 10px 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .ai-chat-bar .ai-dot {
+      width: 28px; height: 28px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--coral), #FF9070);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 14px;
+      flex-shrink: 0;
+    }
+    .ai-chat-bar .placeholder { font-size: 13px; color: rgba(255,255,255,0.5); flex: 1; }
+    .ai-chat-bar .send { font-size: 18px; color: rgba(255,255,255,0.4); }
+
+    /* ── SCREEN 4: Replan ── */
+    .screen-replan { background: #F8F9FC; }
+    .replan-header {
+      background: white;
+      padding: 10px 16px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .replan-header h3 { font-size: 16px; font-weight: 700; color: var(--navy); }
+    .replan-header p { font-size: 11px; color: var(--text-mid); margin-top: 3px; }
+    .replan-body { padding: 10px 12px; }
+    .replan-section { margin-bottom: 8px; }
+    .replan-section-label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text-mid);
+      margin-bottom: 6px;
+      letter-spacing: 0.3px;
+    }
+    .replan-item {
+      background: white;
+      border-radius: 10px;
+      padding: 8px 10px;
+      margin-bottom: 4px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+    }
+    .replan-item.done { opacity: 0.45; }
+    .replan-item.keep { border-left: 3px solid var(--green); }
+    .replan-item.skip { border-left: 3px solid #E5E7EF; }
+    .replan-item .r-icon { font-size: 14px; }
+    .replan-item .r-name { font-size: 12px; font-weight: 600; color: var(--navy); flex: 1; }
+    .replan-item .r-meta { font-size: 10px; color: var(--text-light); }
+    .replan-item .r-reason { font-size: 10px; color: var(--coral); }
+    .replan-time-bar {
+      background: white;
+      border-radius: 10px;
+      padding: 10px 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin: 8px 0;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+    }
+    .replan-time-bar .label { font-size: 11px; color: var(--text-mid); }
+    .replan-time-bar .time { font-size: 14px; font-weight: 700; color: var(--green); }
+    .replan-time-bar .check { font-size: 11px; color: var(--green); }
+    .replan-confirm-btn {
+      background: var(--navy);
+      color: white;
+      border-radius: 12px;
+      padding: 11px;
+      text-align: center;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    /* ── SCREEN 5: Community ── */
+    .screen-community { background: #F8F9FC; }
+    .comm-header {
+      background: white;
+      padding: 10px 16px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .comm-header h3 { font-size: 17px; font-weight: 800; color: var(--navy); padding-bottom: 10px; }
+    .comm-tabs {
+      display: flex;
+      gap: 0;
+    }
+    .comm-tab {
+      font-size: 12px;
+      font-weight: 600;
+      padding: 8px 14px;
+      color: var(--text-light);
+      border-bottom: 2px solid transparent;
+    }
+    .comm-tab.active { color: var(--coral); border-bottom-color: var(--coral); }
+    .comm-feed { padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+    .feed-card {
+      background: white;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+    }
+    .feed-img {
+      height: 90px;
+      background: linear-gradient(135deg, #FFE4D6 0%, #FFD0BC 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 32px;
+      position: relative;
+    }
+    .feed-img .feed-tag {
+      position: absolute;
+      top: 8px; left: 8px;
+      background: rgba(0,0,0,0.45);
+      color: white;
+      font-size: 10px;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-weight: 600;
+    }
+    .feed-info { padding: 10px 12px 10px; }
+    .feed-info h4 { font-size: 13px; font-weight: 700; color: var(--navy); line-height: 1.4; }
+    .feed-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 6px;
+    }
+    .feed-meta .author { font-size: 11px; color: var(--text-light); display: flex; align-items: center; gap: 3px; }
+    .feed-meta .author .av {
+      width: 16px; height: 16px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--coral), #FFD0BC);
+    }
+
+    .route-card {
+      background: white;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+    }
+    .route-header {
+      background: var(--navy);
+      padding: 10px 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .route-header .dest-icon {
+      width: 30px; height: 30px;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.1);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px;
+    }
+    .route-header .r-info h4 { font-size: 13px; font-weight: 700; color: white; }
+    .route-header .r-info p { font-size: 10px; color: rgba(255,255,255,0.5); margin-top: 1px; }
+    .route-header .copy-btn {
+      margin-left: auto;
+      background: var(--coral);
+      color: white;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 5px 10px;
+      border-radius: 8px;
+    }
+    .route-pois { padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+    .route-poi {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .route-poi .num {
+      width: 18px; height: 18px;
+      border-radius: 50%;
+      background: var(--coral-bg);
+      color: var(--coral);
+      font-size: 9px;
+      font-weight: 800;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+    }
+    .route-poi .pname { font-size: 12px; font-weight: 600; color: var(--navy); flex: 1; }
+    .route-poi .ptime { font-size: 10px; color: var(--text-light); }
+    .route-poi .ptip {
+      font-size: 10px;
+      color: var(--green);
+      background: #F0FFF5;
+      padding: 1px 6px;
+      border-radius: 6px;
+    }
+    .route-footer {
+      border-top: 1px solid var(--border);
+      padding: 8px 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .route-footer .copies { font-size: 11px; color: var(--text-light); }
+    .route-footer .copies strong { color: var(--navy); }
+
+    /* ── Section divider ── */
+    .section-wrap { padding: 0; }
+    .section-wrap:nth-child(even) { background: #F8F9FC; }
+    .section-wrap:nth-child(odd) { background: white; }
+
+    /* ── Nav dots ── */
+    .module-num {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px; height: 28px;
+      background: var(--coral);
+      color: white;
+      font-size: 13px;
+      font-weight: 800;
+      border-radius: 8px;
+      margin-right: 8px;
+    }
+
+    /* ── Footer ── */
+    .footer {
+      background: var(--navy);
+      padding: 60px 24px;
+      text-align: center;
+      color: rgba(255,255,255,0.5);
+    }
+    .footer h2 {
+      font-size: 32px;
+      font-weight: 800;
+      color: white;
+      margin-bottom: 12px;
+    }
+    .footer p { font-size: 16px; margin-bottom: 32px; line-height: 1.7; }
+    .footer-badge {
+      display: inline-block;
+      background: rgba(255,107,71,0.15);
+      border: 1px solid rgba(255,107,71,0.3);
+      color: var(--coral-light);
+      padding: 8px 20px;
+      border-radius: 20px;
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    /* ── Responsive ── */
+    @media (max-width: 768px) {
+      .module-inner { grid-template-columns: 1fr; gap: 40px; }
+      .module-inner.reverse { direction: ltr; }
+      .phone-wrap { order: -1; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ══ HERO ══ -->
+<div class="hero">
+  <div class="hero-badge">✈️ &nbsp;Product Concept · v0.1</div>
+  <h1>你的旅行，<span>不该这么累</span></h1>
+  <p>TripMate 是一个真正懂旅行的 AI 伴侣——从行程规划到路上陪伴，从随手记录到内容沉淀，一路都在。</p>
+  <div class="hero-dots">
+    <span class="active"></span>
+    <span></span><span></span><span></span><span></span>
+  </div>
+</div>
+
+<!-- ══ MODULE 1: 行前规划 ══ -->
+<div class="section-wrap">
+<div class="module">
+  <div class="module-inner">
+    <div class="text-content">
+      <div class="module-label"><span class="module-num">1</span> 行前规划</div>
+      <h2 class="module-title">把攻略收藏夹<br/>变成真正能走的行程</h2>
+      <p class="module-desc">输入目的地和偏好，把散落在小红书、大众点评里的攻略链接一起丢给 AI——它会帮你综合所有信息，生成一份路线顺、时间合理、感觉是为你量身定制的行程。</p>
+      <ul class="feature-list">
+        <li>
+          <span class="icon">🏷️</span>
+          <span><strong>偏好标签</strong>：美食向、文化向、网红打卡、户外自然、懒人慢游</span>
+        </li>
+        <li>
+          <span class="icon">🔗</span>
+          <span><strong>一键导入攻略</strong>：分享小红书 / 大众点评链接，AI 自动提取景点餐厅信息</span>
+        </li>
+        <li>
+          <span class="icon">🗺️</span>
+          <span><strong>地图视图验证</strong>：行程同步在地图上显示路线，交通时间清晰可见</span>
+        </li>
+        <li>
+          <span class="icon">✏️</span>
+          <span><strong>自然语言修改</strong>：「把第二天调轻松一点」直接改，不用自己动手排</span>
+        </li>
+      </ul>
+    </div>
+    <div class="phone-wrap">
+      <div class="phone">
+        <div class="phone-notch"></div>
+        <div class="phone-screen screen-planning">
+          <div class="status-bar">
+            <span class="time">9:41</span>
+            <span class="icons">●●● ▮</span>
+          </div>
+          <div class="plan-header">
+            <h3>新建行程</h3>
+            <p>告诉我你想去哪，我来帮你规划</p>
+          </div>
+          <div class="plan-body">
+            <div class="dest-input">
+              <span class="icon">🗼</span>
+              <span class="val">东京</span>
+              <span class="meta">5月20日 · 3天 · 2人</span>
+            </div>
+            <div class="tags-row">
+              <span class="tag active">🍜 美食向</span>
+              <span class="tag active">📸 网红打卡</span>
+              <span class="tag">🏯 文化向</span>
+              <span class="tag">🌿 户外自然</span>
+            </div>
+            <div class="ai-thinking">
+              <span style="font-size:18px">🤖</span>
+              <div class="bubble">
+                <strong>AI 规划思路</strong>
+                综合了你的小红书攻略和偏好，Day 1 安排浅草&上野文化区，Day 2 涩谷&原宿潮流打卡，最后一天新宿扫货收尾，每天路线都不绕圈。
+              </div>
+            </div>
+            <div class="day-card">
+              <div class="day-card-header">
+                <span class="day-badge">Day 1</span>
+                <span class="day-theme">浅草 · 文化 + 美食</span>
+              </div>
+              <div class="poi-row"><span class="poi-dot"></span><span class="poi-name">浅草寺</span><span class="poi-time">09:00 · 1.5h</span></div>
+              <div class="poi-row"><span class="poi-dot"></span><span class="poi-name">仲见世通吃吃喝喝</span><span class="poi-time">10:30 · 1h</span></div>
+              <div class="poi-row"><span class="poi-dot"></span><span class="poi-name">晴空塔展望台</span><span class="poi-time">12:00 · 1h</span></div>
+              <div class="poi-row"><span class="poi-dot"></span><span class="poi-name">上野公园 · 博物馆</span><span class="poi-time">14:00 · 2h</span></div>
+            </div>
+            <div class="day-card">
+              <div class="day-card-header">
+                <span class="day-badge">Day 2</span>
+                <span class="day-theme">涩谷 · 潮流打卡</span>
+              </div>
+              <div class="poi-row"><span class="poi-dot"></span><span class="poi-name">涩谷十字路口</span><span class="poi-time">09:30 · 0.5h</span></div>
+              <div class="poi-row"><span class="poi-dot"></span><span class="poi-name">原宿竹下通</span><span class="poi-time">10:30 · 1.5h</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ══ MODULE 2: 行程预览 ══ -->
+<div class="section-wrap">
+<div class="module">
+  <div class="module-inner reverse">
+    <div class="text-content">
+      <div class="module-label"><span class="module-num">2</span> 行程地图</div>
+      <h2 class="module-title">一眼看清楚<br/>每天怎么走</h2>
+      <p class="module-desc">行程不只是景点列表，更是一条真实可走的路线。地图视图让你在出发前就能看清楚每天的移动轨迹，交通时间标在路线上，顺不顺路一目了然。</p>
+      <ul class="feature-list">
+        <li>
+          <span class="icon">🗓️</span>
+          <span><strong>时间轴 / 地图双视图</strong>：切换查看，详情和路线各取所需</span>
+        </li>
+        <li>
+          <span class="icon">🚇</span>
+          <span><strong>交通时间标注</strong>：每段路程的方式和耗时，直接显示在连线上</span>
+        </li>
+        <li>
+          <span class="icon">🏨</span>
+          <span><strong>起终点约束</strong>：以酒店为每天的出发和收尾点，路线不绕远</span>
+        </li>
+        <li>
+          <span class="icon">⚡</span>
+          <span><strong>自然语言编辑</strong>：随时增删景点，AI 自动重排时间和路线</span>
+        </li>
+      </ul>
+    </div>
+    <div class="phone-wrap">
+      <div class="phone">
+        <div class="phone-notch"></div>
+        <div class="phone-screen screen-itinerary">
+          <div class="status-bar">
+            <span class="time">9:41</span>
+            <span class="icons">●●● ▮</span>
+          </div>
+          <div class="itin-header">
+            <h3>东京 · 3天行程</h3>
+            <p>5月20日 — 5月22日 · 已优化路线</p>
+          </div>
+          <div class="map-preview">
+            <div class="map-bg"></div>
+            <svg style="position:absolute;inset:0;width:100%;height:100%" viewBox="0 0 280 140" fill="none">
+              <path d="M50 90 Q90 50 130 70 Q170 90 220 55" stroke="#007AFF" stroke-width="2" stroke-dasharray="5,3" fill="none" opacity="0.5"/>
+            </svg>
+            <div class="map-pin p1">📍</div>
+            <div class="map-pin p2">📍</div>
+            <div class="map-pin p3">📍</div>
+          </div>
+          <div class="map-day-tabs">
+            <div class="map-day-tab active">Day 1</div>
+            <div class="map-day-tab">Day 2</div>
+            <div class="map-day-tab">Day 3</div>
+          </div>
+          <div class="timeline">
+            <div class="tl-item">
+              <div class="tl-num done">✓</div>
+              <div class="tl-content">
+                <div class="tl-name">🏨 新宿东急酒店（出发）</div>
+                <div class="tl-meta">09:00 · 步行起点</div>
+              </div>
+            </div>
+            <div class="tl-transport">🚶 步行 8分钟</div>
+            <div class="tl-item">
+              <div class="tl-num">1</div>
+              <div class="tl-content">
+                <div class="tl-name">浅草寺</div>
+                <div class="tl-meta">09:10 · 预计 1.5h</div>
+              </div>
+            </div>
+            <div class="tl-transport">🚇 地铁 12分钟</div>
+            <div class="tl-item">
+              <div class="tl-num">2</div>
+              <div class="tl-content">
+                <div class="tl-name">东京晴空塔</div>
+                <div class="tl-meta">11:10 · 预计 1h</div>
+              </div>
+            </div>
+            <div class="tl-transport">🚇 地铁 18分钟</div>
+            <div class="tl-item">
+              <div class="tl-num">3</div>
+              <div class="tl-content">
+                <div class="tl-name">上野公园 · 午餐</div>
+                <div class="tl-meta">12:30 · 预计 2h</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ══ MODULE 3: 旅行中陪伴 ══ -->
+<div class="section-wrap">
+<div class="module">
+  <div class="module-inner">
+    <div class="text-content">
+      <div class="module-label"><span class="module-num">3</span> 旅行中陪伴</div>
+      <h2 class="module-title">全程在线，<br/>随叫随到</h2>
+      <p class="module-desc">旅行开始后，打开 App 直接进入沉浸模式。AI 以你当前的位置和今日行程为中心，主动告诉你下一步该怎么走。想随手记录，三个按钮拍照录音录像，记完直接回地图。</p>
+      <ul class="feature-list">
+        <li>
+          <span class="icon">📍</span>
+          <span><strong>沉浸式主界面</strong>：地图全屏，当前位置 + 今日剩余景点一目了然</span>
+        </li>
+        <li>
+          <span class="icon">📷</span>
+          <span><strong>一键快捷记录</strong>：拍照 / 录像 / 录音，从打开到完成不超过 3 秒</span>
+        </li>
+        <li>
+          <span class="icon">🤖</span>
+          <span><strong>AI 随叫随到</strong>：问附近美食、聊景点历史、调整今天行程节奏</span>
+        </li>
+        <li>
+          <span class="icon">🕐</span>
+          <span><strong>下一站建议</strong>：打卡完成后 AI 主动推荐，含交通方式和出发时间</span>
+        </li>
+      </ul>
+    </div>
+    <div class="phone-wrap">
+      <div class="phone">
+        <div class="phone-notch"></div>
+        <div class="phone-screen screen-trip">
+          <div class="status-bar" style="background:#1A1F3A">
+            <span class="time" style="color:white">9:41</span>
+            <span class="icons" style="color:white">●●● ▮</span>
+          </div>
+          <div class="trip-map">
+            <div class="trip-map-grid"></div>
+            <div class="trip-header-bar">
+              <div class="trip-day-info">
+                <div class="day">Day 2 · 东京</div>
+                <div class="dest">涩谷 · 原宿</div>
+              </div>
+              <div class="weather-chip">⛅ 24°C</div>
+            </div>
+            <svg style="position:absolute;inset:0;width:100%;height:100%" viewBox="0 0 280 260" fill="none">
+              <path d="M70 165 Q110 120 150 140 Q190 160 220 125" stroke="rgba(255,107,71,0.5)" stroke-width="2" fill="none"/>
+            </svg>
+            <div class="map-pin-dark current" style="top:62%;left:35%">📍 现在</div>
+            <div class="map-pin-dark p2" style="font-size:22px">🎯</div>
+            <div class="map-pin-dark p3" style="font-size:18px;opacity:0.5">📌</div>
+          </div>
+          <div class="next-card">
+            <div class="label">下一站</div>
+            <div class="name">涩谷十字路口</div>
+            <div class="info">
+              <span>🚇 地铁 8分钟</span>
+              <span>📷 AI建议 10:00出发</span>
+            </div>
+          </div>
+          <div class="trip-bottom">
+            <div class="record-btns">
+              <div class="rec-btn">
+                <span class="rec-icon">📷</span>
+                拍照
+              </div>
+              <div class="rec-btn">
+                <span class="rec-icon">🎥</span>
+                录像
+              </div>
+              <div class="rec-btn">
+                <span class="rec-icon">🎤</span>
+                录音
+              </div>
+            </div>
+            <div class="ai-chat-bar">
+              <div class="ai-dot">🤖</div>
+              <div class="placeholder">问问旅行搭子…</div>
+              <div class="send">⬆️</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ══ MODULE 4: 动态重规划 ══ -->
+<div class="section-wrap">
+<div class="module">
+  <div class="module-inner reverse">
+    <div class="text-content">
+      <div class="module-label"><span class="module-num">4</span> 动态重规划</div>
+      <h2 class="module-title">计划变了，<br/>AI 帮你算好</h2>
+      <p class="module-desc">跳过了景点、某个地方待太久、突然不想去了——不需要你自己重新排，AI 已经把已完成的锁住、把来得及的保留、把时间不够的标出来，看一眼确认就行。</p>
+      <ul class="feature-list">
+        <li>
+          <span class="icon">✅</span>
+          <span><strong>已完成自动锁定</strong>：打卡过的景点不会被重排，成果感一目了然</span>
+        </li>
+        <li>
+          <span class="icon">✨</span>
+          <span><strong>AI 先给方案</strong>：不是空白表单，而是已经填好推荐答案等你确认</span>
+        </li>
+        <li>
+          <span class="icon">🕐</span>
+          <span><strong>结束时间实时显示</strong>：手动调整景点时，底部预计时间同步更新</span>
+        </li>
+        <li>
+          <span class="icon">🔔</span>
+          <span><strong>不打断当前体验</strong>：Banner 提示非阻断，随时可以稍后再处理</span>
+        </li>
+      </ul>
+    </div>
+    <div class="phone-wrap">
+      <div class="phone">
+        <div class="phone-notch"></div>
+        <div class="phone-screen screen-replan">
+          <div class="status-bar">
+            <span class="time">14:22</span>
+            <span class="icons">●●● ▮</span>
+          </div>
+          <div class="replan-header">
+            <h3>✨ 重新规划行程</h3>
+            <p>时间有些紧了，已帮你整理好建议方案</p>
+          </div>
+          <div class="replan-body">
+            <div class="replan-section">
+              <div class="replan-section-label">✅ 已完成（锁定）</div>
+              <div class="replan-item done">
+                <span class="r-icon">✓</span>
+                <span class="r-name">浅草寺</span>
+                <span class="r-meta">09:30 打卡</span>
+              </div>
+              <div class="replan-item done">
+                <span class="r-icon">✓</span>
+                <span class="r-name">晴空塔</span>
+                <span class="r-meta">11:00 打卡</span>
+              </div>
+            </div>
+            <div class="replan-section">
+              <div class="replan-section-label">✨ AI 建议保留</div>
+              <div class="replan-item keep">
+                <span class="r-icon">📍</span>
+                <span class="r-name">秋叶原</span>
+                <span class="r-meta">预计 14:30</span>
+              </div>
+              <div class="replan-item keep">
+                <span class="r-icon">📍</span>
+                <span class="r-name">东京塔</span>
+                <span class="r-meta">预计 17:00</span>
+              </div>
+            </div>
+            <div class="replan-section">
+              <div class="replan-section-label">⏭ AI 建议跳过</div>
+              <div class="replan-item skip">
+                <span class="r-icon">○</span>
+                <span class="r-name">银座</span>
+                <span class="r-reason">+1.5h，时间不够</span>
+              </div>
+              <div class="replan-item skip">
+                <span class="r-icon">○</span>
+                <span class="r-name">台场</span>
+                <span class="r-reason">偏远，不顺路</span>
+              </div>
+            </div>
+            <div class="replan-time-bar">
+              <span class="label">预计结束时间</span>
+              <div>
+                <span class="time">20:30 </span>
+                <span class="check">✓ 在计划内</span>
+              </div>
+            </div>
+            <div class="replan-confirm-btn">就这样，出发 →</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ══ MODULE 5: 社区发现 ══ -->
+<div class="section-wrap">
+<div class="module">
+  <div class="module-inner">
+    <div class="text-content">
+      <div class="module-label"><span class="module-num">5</span> 旅行内容社区</div>
+      <h2 class="module-title">看别人旅行，<br/>一键变成自己的行程</h2>
+      <p class="module-desc">社区里有两种内容：有温度的图文游记，和能直接复用的行程攻略。攻略里每个景点都是作者的真实打卡记录，AI 规划和实际花了多久一目了然，复制进来就能改成自己的。</p>
+      <ul class="feature-list">
+        <li>
+          <span class="icon">📝</span>
+          <span><strong>图文游记</strong>：用户自己写的真实内容，AI 只负责整理素材框架</span>
+        </li>
+        <li>
+          <span class="icon">🗺️</span>
+          <span><strong>行程攻略</strong>：AI 规划骨架 + 作者实际打卡记录，诚实标注未到访</span>
+        </li>
+        <li>
+          <span class="icon">📋</span>
+          <span><strong>一键复制行程</strong>：把别人的攻略导入自己的规划，作为起点再修改</span>
+        </li>
+        <li>
+          <span class="icon">🔍</span>
+          <span><strong>真实时长对比</strong>：AI 预估 vs 作者实际用时，帮助你做更准确的判断</span>
+        </li>
+      </ul>
+    </div>
+    <div class="phone-wrap">
+      <div class="phone">
+        <div class="phone-notch"></div>
+        <div class="phone-screen screen-community">
+          <div class="status-bar">
+            <span class="time">9:41</span>
+            <span class="icons">●●● ▮</span>
+          </div>
+          <div class="comm-header">
+            <h3>发现</h3>
+            <div class="comm-tabs">
+              <div class="comm-tab active">全部</div>
+              <div class="comm-tab">图文游记</div>
+              <div class="comm-tab">行程攻略</div>
+            </div>
+          </div>
+          <div class="comm-feed">
+            <div class="feed-card">
+              <div class="feed-img">
+                🗼
+                <span class="feed-tag">图文游记</span>
+              </div>
+              <div class="feed-info">
+                <h4>东京五天真实流水账，踩了三个雷也发现了五个宝</h4>
+                <div class="feed-meta">
+                  <div class="author"><div class="av"></div> 旅行者小林</div>
+                  <span style="font-size:11px;color:var(--text-light);margin-left:auto">💬 48 · ❤️ 312</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="route-card">
+              <div class="route-header">
+                <div class="dest-icon">🏯</div>
+                <div class="r-info">
+                  <h4>京都 3天行程攻略</h4>
+                  <p>寺庙 + 美食向 · 已有 128 人复制</p>
+                </div>
+                <div class="copy-btn">复制行程</div>
+              </div>
+              <div class="route-pois">
+                <div class="route-poi">
+                  <div class="num">1</div>
+                  <div class="pname">伏见稻荷大社</div>
+                  <div class="ptime">09:00</div>
+                  <div class="ptip">实际 2h</div>
+                </div>
+                <div class="route-poi">
+                  <div class="num">2</div>
+                  <div class="pname">祗园四条漫步</div>
+                  <div class="ptime">11:30</div>
+                  <div class="ptip">实际 1.5h</div>
+                </div>
+                <div class="route-poi">
+                  <div class="num">3</div>
+                  <div class="pname">锦市场</div>
+                  <div class="ptime">13:30</div>
+                  <div class="ptip">实际 1h</div>
+                </div>
+              </div>
+              <div class="route-footer">
+                <span class="copies">📋 <strong>128</strong> 人复制了这份行程</span>
+                <span style="font-size:11px;color:var(--text-light)">❤️ 收藏</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ══ FOOTER ══ -->
+<div class="footer">
+  <h2>TripMate</h2>
+  <p>你只需要专注于当下——<br/>真正地在那里。</p>
+  <div class="footer-badge">✈️ &nbsp;PRD v0.1 · 2026-03-31</div>
+</div>
+
+</body>
+</html>

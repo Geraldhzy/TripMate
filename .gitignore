@@ -1,6 +1,21 @@
 node_modules/
 .DS_Store
-.env
 *.log
 logs/
 data/
+.claude/
+
+# Environment variables
+.env
+.env.*
+
+# Backup files
+*.bak
+*.tmp
+
+# OS files
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

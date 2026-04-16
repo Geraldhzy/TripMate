@@ -145,6 +145,29 @@ class TripBook {
   updateItinerary(delta) {
     if (!delta) return;
 
+    // ── clearLevel 处理：需求变更时清空已过时的数据 ──
+    if (delta.clearLevel === 'full') {
+      // 重大变更（改目的地/出发城市/日期/天数）：清空全部行程 + 动态数据
+      this.itinerary.route = [];
+      this.itinerary.days = [];
+      this.itinerary.theme = '';
+      this.itinerary.budgetSummary = null;
+      this.itinerary.reminders = [];
+      this.itinerary.practicalInfo = [];
+      this.dynamic.flightQuotes = [];
+      this.dynamic.hotelQuotes = [];
+      this.dynamic.webSearches = [];
+    } else if (delta.clearLevel === 'details') {
+      // 中等变更（改预算/人数）：清空详情，保留框架
+      for (const day of this.itinerary.days) {
+        day.segments = [];
+      }
+      this.itinerary.budgetSummary = null;
+      this.itinerary.reminders = [];
+      this.itinerary.practicalInfo = [];
+      this.dynamic.hotelQuotes = [];
+    }
+
     if (delta.phase !== undefined) {
       this.updatePhase(delta.phase);
     }

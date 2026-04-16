@@ -22,8 +22,8 @@ const chatRequestSchema = Joi.object({
     .min(1),
   
   provider: Joi.string()
-    .valid('openai', 'anthropic', 'deepseek')
-    .default('openai'),
+    .valid('openai', 'anthropic', 'deepseek', 'kimi', 'glm', 'minimax')
+    .default('deepseek'),
   
   model: Joi.string()
     .max(100)

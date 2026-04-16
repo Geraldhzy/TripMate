@@ -3,7 +3,6 @@ const path = require('path');
 const { OpenAI } = require('openai');
 const { v4: uuidv4 } = require('uuid');
 const rateLimit = require('express-rate-limit');
-const Sentry = require('@sentry/node');
 const { validate, sanitizeBody, validateHeaders, chatRequestSchema } = require('./middleware/validation');
 const { getHelmetConfig, getCorsConfig, additionalSecurityHeaders, globalErrorHandler } = require('./middleware/security');
 const { getToolDefinitions, getMainAgentToolDefinitions, executeToolCall, SUB_AGENT_EXCLUSIVE_TOOLS } = require('./tools');
@@ -14,21 +13,6 @@ const log = require('./utils/logger');
 const { DEFAULT_MODELS } = require('./utils/constants');
 
 const app = express();
-
-// ============================================================
-// Sentry Error Monitoring Setup
-// ============================================================
-if (process.env.SENTRY_DSN) {
-  Sentry.init({
-    dsn: process.env.SENTRY_DSN,
-    environment: process.env.NODE_ENV || 'development',
-    tracesSampleRate: process.env.SENTRY_TRACE_SAMPLE_RATE ? parseFloat(process.env.SENTRY_TRACE_SAMPLE_RATE) : 0.1,
-    debug: process.env.SENTRY_DEBUG === 'true'
-  });
-
-  app.use(Sentry.Handlers.requestHandler());
-  app.use(Sentry.Handlers.tracingHandler());
-}
 
 // ============================================================
 // Security Middleware Setup
@@ -59,7 +43,7 @@ app.use(express.static(path.join(__dirname, 'public'), {
 
 app.use(sanitizeBody());
 
-const PORT = process.env.PORT || 3000;
+const PORT = 3002;
 
 // ============================================================
 // Rate Limiting Configuration
@@ -71,7 +55,6 @@ const generalLimiter = rateLimit({
   message: { error: '请求过于频繁，请稍后再试' },
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => req.headers['x-skip-rate-limit'] === process.env.RATE_LIMIT_BYPASS_KEY,
 });
 
 const chatLimiter = rateLimit({
@@ -80,7 +63,6 @@ const chatLimiter = rateLimit({
   message: { error: '您的对话请求过于频繁，请稍后再试' },
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => req.headers['x-skip-rate-limit'] === process.env.RATE_LIMIT_BYPASS_KEY,
 });
 
 const toolLimiter = rateLimit({
@@ -89,7 +71,6 @@ const toolLimiter = rateLimit({
   message: { error: '工具调用请求过于频繁，请稍后再试' },
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => req.headers['x-skip-rate-limit'] === process.env.RATE_LIMIT_BYPASS_KEY,
 });
 
 app.use(generalLimiter);
@@ -101,6 +82,10 @@ app.post('/api/chat', validateHeaders(), validate(chatRequestSchema), chatLimite
   const { messages, provider, model, tripBookSnapshot } = req.body;
   const apiKey = req.headers['x-api-key'];
   const baseUrl = req.headers['x-base-url'] || '';
+  const braveKey = req.headers['x-brave-key'] || '';
+
+  // 将 braveKey 注入到工具可访问的上下文
+  if (braveKey) process.env._BRAVE_KEY_RUNTIME = braveKey;
 
   const reqId = log.generateId();
   const reqLog = log.child({ reqId });
@@ -140,8 +125,8 @@ app.post('/api/chat', validateHeaders(), validate(chatRequestSchema), chatLimite
 
     let fullText = '';
     reqLog.info('开始 LLM 调用', { provider, model });
-    const effectiveBaseUrl = (provider === 'deepseek') ? (baseUrl || 'https://api.deepseek.com/v1') : baseUrl;
-    fullText = await handleChat(apiKey, model, systemPrompt, messages, sendSSE, effectiveBaseUrl, tripBook, reqLog) || '';
+    // OpenAI 兼容提供商（DeepSeek/Kimi/GLM/MiniMax）通过 baseUrl 区分端点
+    fullText = await handleChat(provider, apiKey, model, systemPrompt, messages, sendSSE, baseUrl, tripBook, reqLog) || '';
 
     // Quick Replies 检测
     const quickReplies = extractQuickReplies(fullText);
@@ -153,11 +138,6 @@ app.post('/api/chat', validateHeaders(), validate(chatRequestSchema), chatLimite
     reqTimer.done({ provider, model, responseLen: fullText.length });
   } catch (err) {
     reqLog.error('请求处理失败', { error: err.message, stack: err.stack });
-    if (process.env.SENTRY_DSN) {
-      Sentry.captureException(err, {
-        tags: { context: 'chat_endpoint' }
-      });
-    }
     sendSSE('error', { message: err.message || '未知错误' });
   } finally {
     res.end();
@@ -378,11 +358,6 @@ async function runTool(funcName, funcArgs, toolId, sendSSE, tripBook, delegateCt
     toolLog.error('工具执行失败', { error: toolErr.message, stack: toolErr.stack });
     const errMsg = `工具 ${funcName} 执行失败: ${toolErr.message}`;
     sendSSE('tool_result', { id: toolId, name: funcName, resultLabel: null });
-    if (process.env.SENTRY_DSN) {
-      Sentry.captureException(toolErr, {
-        tags: { context: 'tool_execution', tool: funcName }
-      });
-    }
     return errMsg;
   }
 }
@@ -660,21 +635,73 @@ async function streamOpenAI(client, model, messages, tools, sendSSE, silent = fa
   return { fullText, toolCalls, rawAssistant };
 }
 
-async function handleChat(apiKey, model, systemPrompt, userMessages, sendSSE, baseUrl, tripBook, reqLog) {
+// ============================================================
+// TripBook 补写：LLM 输出了行程文字但没调 update_trip_info 时的自动提取
+// ============================================================
+
+async function tryExtractTripInfo(client, selectedModel, messages, responseText, tools, sendSSE, tripBook, apiKey, baseUrl, chatLog, reqLog) {
+  if (!responseText || responseText.length < 300) return;
+
+  const hasDaySegments = tripBook.itinerary?.days?.some(d => d.segments && d.segments.length > 0);
+  if (hasDaySegments) return; // 已有详细行程，无需补写
+
+  // 仅在 phase >= 3 时触发（phase 1/2 还在收集需求，不该强制写 segments）
+  const currentPhase = (tripBook.itinerary && tripBook.itinerary.phase) || 0;
+  if (currentPhase < 3) return;
+
+  chatLog.info('LLM 输出了行程但 TripBook 缺少详细日程，追加 update_trip_info 提取轮次');
+  try {
+    const extractMessages = [
+      ...messages,
+      { role: 'assistant', content: responseText },
+      { role: 'user', content: `你刚才的回复中包含了行程安排信息，但还没有写入行程参考书。请立即调用 update_trip_info，将回复中的每日行程以结构化格式写入。要求：
+1. 将每天的活动提取为 segments 数组（每个 segment 包含 time, title, type, location, notes）
+2. type 取值：transport/attraction/activity/meal/hotel/flight
+3. 一次调用写入所有天的 segments，不要分多次
+4. 同时写入当前 phase（有详细日程写 phase=3，有预算总结写 phase=4）
+5. 如果回复中有预算信息，也写入 budgetSummary
+只调用 update_trip_info，不要输出任何文字。` }
+    ];
+
+    const updateToolOnly = tools.filter(t => t.function.name === 'update_trip_info');
+    const { toolCalls: extractCalls } = await streamOpenAI(
+      client, selectedModel, extractMessages, updateToolOnly, sendSSE, true
+    );
+
+    if (extractCalls.length > 0) {
+      const delegateCtx = { provider, apiKey, model: selectedModel, baseUrl };
+      for (const tc of extractCalls) {
+        if (tc.name === 'update_trip_info') {
+          await runTool(tc.name, tc.args, tc.id, sendSSE, tripBook, delegateCtx, reqLog);
+          chatLog.info('追加 update_trip_info 提取写入成功');
+        }
+      }
+    } else {
+      chatLog.debug('追加轮次：LLM 未调用 update_trip_info');
+    }
+  } catch (err) {
+    chatLog.warn('追加 update_trip_info 提取失败', { error: err.message });
+  }
+}
+
+async function handleChat(provider, apiKey, model, systemPrompt, userMessages, sendSSE, baseUrl, tripBook, reqLog) {
   const chatLog = (reqLog || log);
 
   const clientOpts = { apiKey };
   if (baseUrl) clientOpts.baseURL = baseUrl;
   const client = new OpenAI(clientOpts);
   const tools = getMainAgentToolDefinitions();
-  const selectedModel = model || DEFAULT_MODELS.openai;
+  const selectedModel = model || DEFAULT_MODELS[provider] || DEFAULT_MODELS.openai;
 
   const messages = [{ role: 'system', content: systemPrompt }, ...userMessages];
 
-  const MAX_TOOL_ROUNDS = 10;
+  const MAX_TOOL_ROUNDS = 12;
   let delegationCount = 0;
+  let delegationDone = false; // 委派完成标记
   const delegatedAgents = new Set(); // 记录已成功委派过的 agent 类型，防止重复委派
   let pendingCoverMsg = null; // coveredTopics 消息暂存，等 tool 消息全部 push 后再注入
+  const webSearchCache = new Map(); // web_search 去重缓存：normalizedQuery → resultStr
+  const coveredKeywords = []; // 子Agent已覆盖的主题关键词，用于精准拦截重复搜索
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     if (round > 0) {
@@ -690,9 +717,14 @@ async function handleChat(apiKey, model, systemPrompt, userMessages, sendSSE, ba
 
     if (toolCalls.length === 0) {
       sendSSE('thinking_done', {});
-      // 过滤可能泄露的 function call JSON 片段
+      // 过滤可能泄露的 function call JSON 片段（DeepSeek R1 可能在文本中输出 DSML / <think> 等）
       const safeText = sanitizeLLMOutput(fullText);
-      sendSSE('token', { text: safeText });
+
+      // 仅当 sanitize 修改了文本时才重发（R1 模型会输出 <think> 和 DSML 标签需要清理）
+      // 对于 V3/GPT-4o 等正常模型，流式阶段已将 token 逐个推送，无需重发
+      if (safeText !== fullText) {
+        sendSSE('replace_text', { text: safeText });
+      }
 
       // 最终输出时检查 phase 是否需要推进（LLM 可能在文本中输出预算但没调工具）
       try {
@@ -709,6 +741,14 @@ async function handleChat(apiKey, model, systemPrompt, userMessages, sendSSE, ba
     // 有工具调用时也发 thinking_done，让前端清除思考指示器
     sendSSE('thinking_done', {});
 
+    // ── 如果 LLM 同时输出了文本和工具调用，清除已推送的文本 ──
+    // 流式阶段文本已逐 token 推给前端，但这只是 LLM 的中间思考，
+    // 真正的回复会在工具执行完后的下一轮生成。清除避免重复显示。
+    if (fullText && fullText.trim().length > 0) {
+      sendSSE('fold_text', {});
+      chatLog.debug('折叠工具调用轮次的中间文本', { textLen: fullText.length });
+    }
+
     messages.push(rawAssistant);
 
     // ⚠️ 轮次检查：在执行工具前进行（防止在 maxRounds 触发时仍然执行工具）
@@ -718,13 +758,36 @@ async function handleChat(apiKey, model, systemPrompt, userMessages, sendSSE, ba
         maxRounds: MAX_TOOL_ROUNDS,
         toolCount: toolCalls.length
       });
-      // 给每个 tool_call 填充拒绝响应（保证 assistant.tool_calls → tool 消息顺序完整）
+
+      // 最后一轮仍然放行 update_trip_info（确保行程看板同步）
+      const lastRoundUpdateCalls = toolCalls.filter(tc => tc.name === 'update_trip_info');
+      if (lastRoundUpdateCalls.length > 0) {
+        chatLog.info('最后轮次放行 update_trip_info', { count: lastRoundUpdateCalls.length });
+        const delegateCtx = { provider, apiKey, model: selectedModel, baseUrl };
+        for (const tc of lastRoundUpdateCalls) {
+          try {
+            await runTool(tc.name, tc.args, tc.id, sendSSE, tripBook, delegateCtx, reqLog);
+          } catch (err) {
+            chatLog.warn('最后轮次 update_trip_info 执行失败', { error: err.message });
+          }
+        }
+      }
+
+      // 给每个 tool_call 填充响应（保证 assistant.tool_calls → tool 消息顺序完整）
       for (const tc of toolCalls) {
-        messages.push({
-          role: 'tool',
-          tool_call_id: tc.id,
-          content: '⚠️ 已达工具调用轮次上限，本次工具调用被跳过。请直接基于已有信息生成最终总结回复用户。'
-        });
+        if (tc.name === 'update_trip_info') {
+          messages.push({
+            role: 'tool',
+            tool_call_id: tc.id,
+            content: '已更新行程信息。已达工具调用轮次上限，请直接基于已有信息生成最终总结回复用户。'
+          });
+        } else {
+          messages.push({
+            role: 'tool',
+            tool_call_id: tc.id,
+            content: '⚠️ 已达工具调用轮次上限，本次工具调用被跳过。请直接基于已有信息生成最终总结回复用户。'
+          });
+        }
       }
       // 跳出循环，进入下方"最终总结"LLM 调用
       break;
@@ -732,6 +795,38 @@ async function handleChat(apiKey, model, systemPrompt, userMessages, sendSSE, ba
 
     // ── 并行执行所有工具调用（包括委派检查） ──
     const toolPromises = toolCalls.map(async (tc) => {
+      // ── 委派完成后，拦截与已覆盖主题重复的 web_search ──
+      // phase 3 的景点/餐厅/住宿搜索是允许的，只拦截子Agent已覆盖的签证/航线/交通/天气/美食概览
+      if (delegationDone && tc.name === 'web_search' && tc.args?.query) {
+        const q = tc.args.query.toLowerCase();
+        const BLOCKED_PATTERNS = [
+          /签证|visa|入境|eNTRI|evisa/,
+          /航班|航线|机票|直飞|廉航|航空/,
+          /天气|气候|气温|降雨/,
+          /城际交通|怎么去|大巴|拼车|机场.{0,4}(到|去)/,
+          /美食概览|必吃|特色美食|当地美食推荐/,
+        ];
+        const isBlocked = BLOCKED_PATTERNS.some(p => p.test(q));
+        if (isBlocked) {
+          chatLog.info('拦截委派后的重复 web_search', { query: q.slice(0, 60) });
+          sendSSE('tool_start', { id: tc.id, name: tc.name, arguments: tc.args });
+          sendSSE('tool_result', { id: tc.id, name: tc.name, resultLabel: '已跳过（子Agent已覆盖）' });
+          return { id: tc.id, content: '⚠️ 该主题已由子Agent完成调研，请直接使用已有信息。', toolName: tc.name };
+        }
+      }
+
+      // ── web_search 去重缓存 ──
+      if (tc.name === 'web_search' && tc.args?.query) {
+        const normalizedQuery = tc.args.query.toLowerCase().trim().replace(/\s+/g, ' ');
+        if (webSearchCache.has(normalizedQuery)) {
+          chatLog.info('web_search 命中去重缓存', { query: normalizedQuery.slice(0, 60) });
+          sendSSE('tool_start', { id: tc.id, name: tc.name, arguments: tc.args });
+          const cachedResult = webSearchCache.get(normalizedQuery);
+          sendSSE('tool_result', { id: tc.id, name: tc.name, resultLabel: '已缓存结果' });
+          return { id: tc.id, content: cachedResult, toolName: tc.name };
+        }
+      }
+
       // 委派检查在执行前进行（保持顺序一致性）
       if (tc.name === 'delegate_to_agents') {
         delegationCount++;
@@ -757,9 +852,15 @@ async function handleChat(apiKey, model, systemPrompt, userMessages, sendSSE, ba
         }
       }
 
-      const delegateCtx = { provider: 'openai', apiKey, model: selectedModel, baseUrl };
+      const delegateCtx = { provider, apiKey, model: selectedModel, baseUrl };
       const resultStr = await runTool(tc.name, tc.args, tc.id, sendSSE, tripBook, delegateCtx, reqLog);
-      
+
+      // ── web_search 结果写入去重缓存 ──
+      if (tc.name === 'web_search' && tc.args?.query && resultStr) {
+        const normalizedQuery = tc.args.query.toLowerCase().trim().replace(/\s+/g, ' ');
+        webSearchCache.set(normalizedQuery, resultStr);
+      }
+
       // 对 delegate_to_agents 的结果，记录已委派 agent + 收集 coveredTopics
       if (tc.name === 'delegate_to_agents') {
         try {
@@ -770,6 +871,11 @@ async function handleChat(apiKey, model, systemPrompt, userMessages, sendSSE, ba
               if (r.status === 'success' && r.agent) {
                 delegatedAgents.add(r.agent);
               }
+            }
+            // 有任何成功的委派 → 标记委派完成，后续禁止 web_search
+            if (delegatedAgents.size > 0) {
+              delegationDone = true;
+              chatLog.info('委派完成，后续 web_search 将被拦截', { delegatedAgents: Array.from(delegatedAgents) });
             }
             chatLog.debug('已记录委派过的Agent', { delegatedAgents: Array.from(delegatedAgents) });
           }
@@ -803,49 +909,19 @@ ${delegResult._instruction || ''}`.trim();
       return { id: tc.id, content: `工具 ${tc.name} 执行失败: ${r.reason?.message || '未知错误'}`, toolName: tc.name };
     });
 
-    // ── 自动推进 phase ──
-    try {
-      const currentPhase = (tripBook.itinerary && tripBook.itinerary.phase) || 0;
-      const toolNames = toolCalls.map(tc => tc.name);
-      let inferredPhase = currentPhase;
+    // ── Phase 回退检测：update_trip_info 可能触发了 clearLevel 回退 ──
+    // 记录工具执行前的 phase，和执行后对比
+    const phaseBeforeTools = (tripBook.itinerary && tripBook.itinerary.phase) || 0;
 
-      if (currentPhase < 2 && toolNames.some(n => ['delegate_to_agents', 'search_flights'].includes(n))) {
-        inferredPhase = 2;
-      } else if (currentPhase < 3 && toolNames.some(n => ['search_hotels', 'search_poi'].includes(n))) {
-        inferredPhase = 3;
-      }
-
-      // phase 4 自动推进：多种触发条件
-      if (currentPhase < 4) {
-        // 条件1: TripBook 已有 budgetSummary（工具执行后已同步）
-        if (tripBook.itinerary.budgetSummary && tripBook.itinerary.budgetSummary.total_cny) {
-          inferredPhase = 4;
-        }
-        // 条件2: LLM 主动传了 phase=4 或 budgetSummary
-        if (toolNames.includes('update_trip_info')) {
-          for (const tc of toolCalls) {
-            if (tc.name === 'update_trip_info') {
-              try {
-                const args = tc.args || {};
-                if (args.itinerary?.budgetSummary || args.phase === 4) {
-                  inferredPhase = 4;
-                }
-              } catch {}
-            }
-          }
-        }
-      }
-
-      if (inferredPhase > currentPhase) {
-        chatLog.info('自动推进 phase', { from: currentPhase, to: inferredPhase, trigger: toolNames.join(',') });
-        tripBook.updatePhase(inferredPhase);
-        sendSSE('tripbook_update', {
-          ...tripBook.toPanelData(),
-          _snapshot: tripBook.toJSON()
-        });
-      }
-    } catch (err) {
-      chatLog.warn('自动推进 phase 失败', { error: err.message });
+    // ── Phase 回退检测（对比工具执行前后的 phase） ──
+    // 自动推进已移除：phase 完全由 LLM 通过 update_trip_info(phase=X) 驱动
+    const phaseAfterTools = (tripBook.itinerary && tripBook.itinerary.phase) || 0;
+    if (phaseAfterTools < phaseBeforeTools) {
+      chatLog.info('检测到 phase 回退，重置委派标记', { from: phaseBeforeTools, to: phaseAfterTools });
+      delegationDone = false;
+      delegatedAgents.clear();
+      delegationCount = 0;
+      webSearchCache.clear();
     }
 
     // 先 push 所有 tool 消息（保证 assistant.tool_calls → tool 消息顺序完整）
@@ -864,6 +940,34 @@ ${delegResult._instruction || ''}`.trim();
   chatLog.warn('工具调用轮次已达上限，执行最终总结', { maxRounds: MAX_TOOL_ROUNDS, delegationCount });
   sendSSE('thinking_done', {});
 
+  // 如果 TripBook 缺少 segments，先强制写入再做总结
+  const hasDaySegmentsBeforeSummary = tripBook.itinerary?.days?.some(d => d.segments && d.segments.length > 0);
+  const phaseBeforeSummary = (tripBook.itinerary && tripBook.itinerary.phase) || 0;
+  if (!hasDaySegmentsBeforeSummary && phaseBeforeSummary >= 3) {
+    chatLog.info('轮次耗尽前 TripBook 缺 segments，先强制写入');
+    messages.push({
+      role: 'user',
+      content: '在生成最终总结前，请先调用 update_trip_info 将目前已规划的每日行程以结构化格式写入。一次调用包含所有天的 segments。然后再输出总结。'
+    });
+    try {
+      const updateToolOnly = tools.filter(t => t.function.name === 'update_trip_info');
+      const { toolCalls: forceCalls, rawAssistant: forceRaw } = await streamOpenAI(client, selectedModel, messages, updateToolOnly, sendSSE, true);
+      if (forceCalls.length > 0) {
+        messages.push(forceRaw);
+        const delegateCtx = { provider, apiKey, model: selectedModel, baseUrl };
+        for (const tc of forceCalls) {
+          if (tc.name === 'update_trip_info') {
+            const result = await runTool(tc.name, tc.args, tc.id, sendSSE, tripBook, delegateCtx, reqLog);
+            messages.push({ role: 'tool', tool_call_id: tc.id, content: result });
+            chatLog.info('轮次耗尽前强制 update_trip_info 写入成功');
+          }
+        }
+      }
+    } catch (err) {
+      chatLog.warn('轮次耗尽前强制 update_trip_info 失败', { error: err.message });
+    }
+  }
+
   // 追加一条系统级提示，引导 LLM 输出最终总结而非继续调用工具
   messages.push({
     role: 'user',
@@ -873,6 +977,10 @@ ${delegResult._instruction || ''}`.trim();
   try {
     // 不传 tools → LLM 无法调用工具，必须直接输出文本；silent=false 直接流式输出
     const { fullText: finalText } = await streamOpenAI(client, selectedModel, messages, [], sendSSE, false);
+
+    // ── 最终总结后：检查 TripBook 是否缺少详细行程，追加一轮写入 ──
+    await tryExtractTripInfo(client, selectedModel, messages, finalText, tools, sendSSE, tripBook, apiKey, baseUrl, chatLog, reqLog);
+
     return finalText;
   } catch (err) {
     chatLog.error('最终总结调用失败', { error: err.message });
@@ -884,15 +992,6 @@ ${delegResult._instruction || ''}`.trim();
 // ============================================================
 // Sentry Error Handler Middleware
 // ============================================================
-if (process.env.SENTRY_DSN) {
-  app.use(Sentry.Handlers.errorHandler({
-    shouldHandleError(error) {
-      if (error.status === 404) return false;
-      return error.status >= 500 || !error.status;
-    }
-  }));
-}
-
 app.use(globalErrorHandler());
 
 // ============================================================
@@ -900,10 +999,7 @@ app.use(globalErrorHandler());
 // ============================================================
 
 app.listen(PORT, () => {
-  log.info('AI Travel Planner 已启动', { port: PORT, env: process.env.NODE_ENV || 'development' });
-  if (process.env.SENTRY_DSN) {
-    log.info('Sentry monitoring enabled');
-  }
+  log.info('AI Travel Planner 已启动', { port: PORT });
 
   const MEM_WARN_MB = 512;
   setInterval(() => {

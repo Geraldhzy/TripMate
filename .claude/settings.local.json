@@ -86,7 +86,13 @@
       "Bash(sed -n '584p' /Users/geraldhuang/DEV/ai-travel-planner/server.js)",
       "Bash(sed -n '640,645p' /Users/geraldhuang/DEV/ai-travel-planner/server.js)",
       "Bash(sed -n '668,675p' /Users/geraldhuang/DEV/ai-travel-planner/server.js)",
-      "Bash(du -h /Users/geraldhuang/DEV/ai-travel-planner/EXPLORATION_*.* /Users/geraldhuang/DEV/ai-travel-planner/PROJECT_EXPLORATION_REPORT.md)"
+      "Bash(du -h /Users/geraldhuang/DEV/ai-travel-planner/EXPLORATION_*.* /Users/geraldhuang/DEV/ai-travel-planner/PROJECT_EXPLORATION_REPORT.md)",
+      "Bash(WEB_SEARCH_DEBUG=true node -e \"const {execute} = require\\('./tools/web-search'\\); execute\\({query:'Tokyo Shinjuku best ramen',language:'en'}\\).then\\(r => console.log\\(r.substring\\(0,500\\)\\)\\)\")",
+      "Bash(curl -s 'https://html.duckduckgo.com/html/?q=Tokyo+Sensoji+Temple+guide' -H 'User-Agent: Mozilla/5.0')",
+      "Bash(curl:*)",
+      "Bash(WEB_SEARCH_DEBUG=true node:*)",
+      "Bash(du -sh ENV*.*)",
+      "Bash(cp:*)"
     ]
   }
 }

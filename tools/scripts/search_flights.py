@@ -62,6 +62,23 @@ def main():
     try:
         from fast_flights import FlightData, Passengers, get_flights
 
+        # ── 连通性检测：先快速测试 Google Flights 是否可达 ──
+        import urllib.request
+        try:
+            req = urllib.request.Request(
+                'https://www.google.com/travel/flights',
+                headers={'User-Agent': 'Mozilla/5.0'}
+            )
+            urllib.request.urlopen(req, timeout=5)
+        except Exception:
+            # Google Flights 不可达，直接返回建议用 web_search 兜底
+            print(json.dumps({
+                "error": "Google Flights 无法访问（网络不通或被屏蔽）",
+                "suggestion": f"请使用 web_search 工具搜索机票价格，例如搜索：'{origin} to {destination} {date} flight price site:skyscanner.com' 或 '{origin} {destination} {date} 机票价格'",
+                "fallback": True
+            }))
+            return
+
         flight_data = FlightData(
             date=date,
             from_airport=origin,
@@ -119,6 +136,10 @@ def main():
             price_usd = parse_price_usd(price_raw)
             # 跳过价格明确为 0 的占位条目（不同于 unavailable）
             if price_usd is not None and price_usd <= 0:
+                continue
+
+            # 跳过信息严重缺失的条目（只有价格但没航司也没时间，对用户没有参考价值）
+            if (not airline or airline == '未知航司') and (not dep or dep == '时间未知') and (not arr or arr == '时间未知'):
                 continue
 
             # 去重键：优先用出发+到达+航司，若时间缺失则用航司+价格

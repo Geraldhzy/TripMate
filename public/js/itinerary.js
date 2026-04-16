@@ -248,6 +248,11 @@ function renderPanel() {
   // ── Section 4: 行前准备（有数据就展示） ──
   html += renderSectionChecklist();
 
+  // ── 导出按钮（Phase 4 完成后显示） ──
+  if (s.phase === 4) {
+    html += '<div class="export-section"><button class="btn-export" onclick="exportTripPDF()">📄 导出行程 PDF</button></div>';
+  }
+
   body.innerHTML = html;
   body.scrollTop = 0;
 }
@@ -390,33 +395,35 @@ function renderSectionChecklist() {
   let html = '<section class="panel-section">';
   html += '<div class="panel-section-header">📋 行前准备</div>';
 
-  // 实用信息
+  // 实用信息（分两列紧凑展示）
   if (hasPractical) {
-    html += '<div class="itin-practical">';
+    html += '<div class="itin-practical-grid">';
     for (const item of s.practicalInfo) {
       const icon = item.icon || 'ℹ️';
-      html += `<div class="itin-practical-item">
-        <span class="itin-practical-icon">${icon}</span>
-        <div class="itin-practical-body">
-          <div class="itin-practical-cat">${escItinHtml(item.category)}</div>
-          <div class="itin-practical-text">${escItinHtml(item.content)}</div>
+      html += `<div class="itin-practical-card">
+        <div class="itin-practical-card-header">
+          <span class="itin-practical-icon">${icon}</span>
+          <span class="itin-practical-cat">${escItinHtml(item.category)}</span>
         </div>
+        <div class="itin-practical-text">${escItinHtml(item.content)}</div>
       </div>`;
     }
     html += '</div>';
   }
 
-  // 行前清单
+  // 行前清单（可勾选的 checkbox）
   if (hasReminders) {
-    html += '<div class="itin-reminders">';
-    html += '<div class="itin-reminders-title">出发前记得</div>';
-    for (const r of s.reminders) {
-      html += `<div class="itin-reminder-item">
-        <span class="itin-reminder-check">☐</span>
-        <span>${escItinHtml(r)}</span>
-      </div>`;
+    html += '<div class="itin-checklist">';
+    html += '<div class="itin-checklist-title">✅ 出发前清单</div>';
+    html += '<div class="itin-checklist-items">';
+    for (let i = 0; i < s.reminders.length; i++) {
+      const r = s.reminders[i];
+      html += `<label class="itin-checklist-item">
+        <input type="checkbox" class="itin-check-input" data-idx="${i}">
+        <span class="itin-check-label">${escItinHtml(r)}</span>
+      </label>`;
     }
-    html += '</div>';
+    html += '</div></div>';
   }
 
   html += '</section>';
@@ -639,4 +646,162 @@ function escItinHtml(str) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+// ============================================================
+// PDF 导出（打印优化页面）
+// ============================================================
+function exportTripPDF() {
+  const s = itineraryState;
+  const esc = escItinHtml;
+
+  // ── 构建基本信息 ──
+  let headerHtml = '';
+  if (s.destination) headerHtml += `<h1>${esc(s.destination)}</h1>`;
+  if (s.theme) headerHtml += `<p class="theme">${esc(s.theme)}</p>`;
+
+  const infoItems = [];
+  if (s.dates) infoItems.push(`📅 ${esc(s.dates)}${s.days ? `（${s.days}天）` : ''}`);
+  if (s.departCity) infoItems.push(`🛫 出发：${esc(s.departCity)}`);
+  if (s.people) infoItems.push(`👥 ${s.people}人`);
+  if (s.budget) infoItems.push(`💰 预算：${esc(s.budget)}/人`);
+  if (s.route && s.route.length > 0) infoItems.push(`🗺️ ${s.route.join(' → ')}`);
+  const infoHtml = infoItems.length > 0
+    ? `<div class="info-bar">${infoItems.join('<span class="sep">|</span>')}</div>` : '';
+
+  // ── 构建每日行程 ──
+  let daysHtml = '';
+  if (s.daysPlan && s.daysPlan.length > 0) {
+    for (const day of s.daysPlan) {
+      daysHtml += `<div class="day-card">`;
+      daysHtml += `<div class="day-header"><span class="day-num">Day ${day.day}</span>`;
+      if (day.date) daysHtml += `<span class="day-date">${esc(day.date)}</span>`;
+      if (day.city) daysHtml += `<span class="day-city">${esc(day.city)}</span>`;
+      daysHtml += `</div>`;
+      if (day.title) daysHtml += `<div class="day-title">${esc(day.title)}</div>`;
+
+      if (day.segments && day.segments.length > 0) {
+        daysHtml += '<div class="timeline">';
+        for (const seg of day.segments) {
+          const typeIcons = { flight: '✈️', hotel: '🏨', meal: '🍽️', transport: '🚌', attraction: '📍', activity: '🎯' };
+          const icon = typeIcons[seg.type] || '📌';
+          daysHtml += `<div class="seg">`;
+          daysHtml += `<div class="seg-time">${esc(seg.time) || ''}</div>`;
+          daysHtml += `<div class="seg-body">`;
+          daysHtml += `<div class="seg-title">${icon} ${esc(seg.title)}</div>`;
+          const details = [seg.location, seg.duration, seg.notes].filter(Boolean).map(esc).join(' · ');
+          if (details) daysHtml += `<div class="seg-detail">${details}</div>`;
+          daysHtml += `</div></div>`;
+        }
+        daysHtml += '</div>';
+      }
+      daysHtml += '</div>';
+    }
+  }
+
+  // ── 构建预算摘要 ──
+  let budgetHtml = '';
+  if (s.budgetSummary) {
+    const bs = s.budgetSummary;
+    budgetHtml += '<div class="section"><h2>💰 预算概览</h2><table class="budget-table">';
+    const categories = ['flights', 'accommodation', 'food', 'transport', 'activities', 'other'];
+    const catLabels = { flights: '机票', accommodation: '住宿', food: '餐饮', transport: '交通', activities: '门票/活动', other: '其他' };
+    for (const cat of categories) {
+      const item = bs[cat];
+      if (item && (item.amount_cny || item.label)) {
+        budgetHtml += `<tr><td>${esc(item.label || catLabels[cat] || cat)}</td><td class="amount">¥${item.amount_cny || '—'}</td></tr>`;
+        if (item.notes) budgetHtml += `<tr><td colspan="2" class="note">${esc(item.notes)}</td></tr>`;
+      }
+    }
+    if (bs.total_cny) budgetHtml += `<tr class="total"><td>合计</td><td class="amount">¥${bs.total_cny}</td></tr>`;
+    budgetHtml += '</table></div>';
+  }
+
+  // ── 构建行前准备 ──
+  let prepHtml = '';
+  if (s.practicalInfo && s.practicalInfo.length > 0) {
+    prepHtml += '<div class="section"><h2>📋 行前准备</h2><div class="prep-grid">';
+    for (const item of s.practicalInfo) {
+      prepHtml += `<div class="prep-item"><strong>${item.icon || 'ℹ️'} ${esc(item.category)}</strong><p>${esc(item.content)}</p></div>`;
+    }
+    prepHtml += '</div></div>';
+  }
+
+  let checklistHtml = '';
+  if (s.reminders && s.reminders.length > 0) {
+    checklistHtml += '<div class="section"><h2>✅ 出发前清单</h2><div class="checklist">';
+    for (const r of s.reminders) {
+      checklistHtml += `<label class="check-item">☐ ${esc(r)}</label>`;
+    }
+    checklistHtml += '</div></div>';
+  }
+
+  // ── 组装完整 HTML ──
+  const title = s.destination ? `${s.destination} 旅行计划` : '旅行计划';
+  const fullHtml = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>${esc(title)}</title>
+<style>
+  @page { size: A4; margin: 20mm 15mm; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; color: #1e293b; line-height: 1.6; font-size: 12px; padding: 0; }
+  h1 { font-size: 24px; color: #1e40af; margin-bottom: 4px; }
+  h2 { font-size: 16px; color: #1e40af; margin-bottom: 10px; padding-bottom: 4px; border-bottom: 2px solid #dbeafe; }
+  .theme { font-size: 14px; color: #64748b; margin-bottom: 12px; }
+  .info-bar { display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px; color: #475569; background: #f1f5f9; padding: 8px 12px; border-radius: 6px; margin-bottom: 20px; }
+  .info-bar .sep { color: #cbd5e1; margin: 0 2px; }
+  .section { margin-bottom: 20px; }
+  .day-card { margin-bottom: 16px; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden; page-break-inside: avoid; }
+  .day-header { background: #1e40af; color: #fff; padding: 8px 12px; display: flex; gap: 12px; align-items: center; font-size: 13px; }
+  .day-num { font-weight: 700; }
+  .day-date { opacity: .85; }
+  .day-city { opacity: .85; }
+  .day-title { background: #eff6ff; padding: 6px 12px; font-size: 12px; color: #1e40af; font-weight: 600; }
+  .timeline { padding: 8px 12px; }
+  .seg { display: flex; gap: 10px; padding: 5px 0; border-bottom: 1px solid #f1f5f9; }
+  .seg:last-child { border-bottom: none; }
+  .seg-time { width: 45px; flex-shrink: 0; font-size: 11px; color: #64748b; font-weight: 600; padding-top: 1px; }
+  .seg-body { flex: 1; }
+  .seg-title { font-size: 12px; font-weight: 600; color: #1e293b; }
+  .seg-detail { font-size: 11px; color: #64748b; margin-top: 1px; }
+  .budget-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .budget-table td { padding: 6px 10px; border-bottom: 1px solid #f1f5f9; }
+  .budget-table .amount { text-align: right; font-weight: 600; color: #1e40af; }
+  .budget-table .note { font-size: 11px; color: #94a3b8; padding: 2px 10px 6px; }
+  .budget-table .total td { border-top: 2px solid #1e40af; font-weight: 700; font-size: 13px; }
+  .prep-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .prep-item { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 8px 10px; }
+  .prep-item strong { display: block; font-size: 12px; color: #1e40af; margin-bottom: 3px; }
+  .prep-item p { font-size: 11px; color: #475569; }
+  .checklist { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 16px; }
+  .check-item { font-size: 12px; color: #334155; padding: 3px 0; }
+  .footer { text-align: center; color: #94a3b8; font-size: 10px; margin-top: 30px; padding-top: 10px; border-top: 1px solid #e2e8f0; }
+  @media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
+</style>
+</head>
+<body>
+${headerHtml}
+${infoHtml}
+${daysHtml ? `<div class="section"><h2>🗓️ 每日行程</h2>${daysHtml}</div>` : ''}
+${budgetHtml}
+${prepHtml}
+${checklistHtml}
+<div class="footer">由 AI Travel Planner 生成 · ${new Date().toLocaleDateString('zh-CN')}</div>
+</body>
+</html>`;
+
+  // ── 打开新窗口并打印 ──
+  const printWin = window.open('', '_blank', 'width=800,height=600');
+  if (!printWin) {
+    alert('请允许弹窗以导出 PDF');
+    return;
+  }
+  printWin.document.write(fullHtml);
+  printWin.document.close();
+  // 等待渲染完成后触发打印
+  printWin.onload = () => {
+    setTimeout(() => printWin.print(), 300);
+  };
 }

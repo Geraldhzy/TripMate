@@ -51,9 +51,10 @@ const TOOL_DEF = {
           '⚠️ 重要：days 按天级替换。只传需要修改的天（未传的天保持不变）。每次传某天时，必须包含该天的完整 segments 列表，系统会用你传入的 segments 完全覆盖该天已有数据。',
           'segment 格式：{ time: "14:00", title: "抵达机场", type: "flight", location: "成田机场", duration: "", notes: "" }，',
           'segment.type 必须是以下之一：transport（交通）、attraction（景点）、activity（体验活动）、meal（餐饮）、hotel（住宿）、flight（航班），用于前端分类展示。',
-          'budgetSummary: { flights: { amount_cny: 6480, label: "机票" }, ..., total_cny: 17964 }，',
+          'budgetSummary: { flights: { amount_cny: 3240, label: "机票", notes: "北京-东京往返" }, ..., total_cny: 8982 } — 仅计算单人费用，不要乘以人数，',
           'reminders: ["出发前完成Visit Japan Web注册", "兑换3万日元现金", "购买旅行保险"] — 行前准备清单，在最终阶段必须写入，',
-          'practicalInfo: [{ category: "签证", content: "中国护照需提前1-2个月通过旅行社申请，准备在职证明和银行流水", icon: "🛂" }] — AI分析总结的实用信息，按category覆盖更新。常用分类：签证(🛂)、货币支付(💱)、交通出行(🚄)、通讯网络(📱)、气候穿衣(👔)、文化礼仪(🎌)'
+          'practicalInfo: [{ category: "签证", content: "中国护照需提前1-2个月通过旅行社申请，准备在职证明和银行流水", icon: "🛂" }] — AI分析总结的实用信息，按category覆盖更新。常用分类：签证(🛂)、货币支付(💱)、交通出行(🚄)、通讯网络(📱)、气候穿衣(👔)、文化礼仪(🎌)，',
+          'clearLevel: "full" | "details" — 需求变更时清空已过时数据。full=清空全部行程+动态数据（改目的地/出发城市/日期/天数时使用）；details=清空详情保留框架（改预算/人数时使用）。正常推进时不传此字段。'
         ].join('')
       }
     }

@@ -50,8 +50,19 @@ function getToolsForAgent(agentType, format = 'openai') {
 function extractCleanSummary(result, maxLen = 80) {
   if (!result) return '完成';
 
+  // 先清理 DSML 标签、<think> 块等技术内容
+  let cleaned = result
+    .replace(/<think>[\s\S]*?(<\/think>|$)/g, '')                    // <think>...</think>
+    .replace(/<[｜|]?\s*DSML[\s\S]*?DSML\s*[｜|]?>/g, '')            // DSML 块
+    .replace(/<\/?[｜|]?\s*DSML[｜|]?\s*(?:function_calls|invoke|parameter)[^>]*>/g, '') // DSML 残留标签
+    .replace(/\{[\s]*"(?:name|function)"[\s]*:[\s]*"[\s\S]*?\}/g, '') // 工具调用 JSON
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  if (!cleaned) return '完成';
+
   // 如果结果看起来像 JSON（以 { 或 [ 开头），尝试解析并提取有意义的信息
-  const trimmed = result.trim();
+  const trimmed = cleaned.trim();
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
     try {
       const data = JSON.parse(trimmed);
@@ -186,22 +197,56 @@ function createProviderAdapter(provider, apiKey, baseUrl) {
     },
 
     async complete(model, _system, messages, tools, maxTokens) {
-      const response = await client.chat.completions.create({
+      const hasTools = tools.length > 0;
+      const stream = await client.chat.completions.create({
         model,
         messages,
-        tools: tools.length > 0 ? tools : undefined,
-        tool_choice: tools.length > 0 ? 'auto' : undefined,
+        tools: hasTools ? tools : undefined,
+        tool_choice: hasTools ? 'auto' : undefined,
         temperature: 0.5,
         max_tokens: maxTokens || 2048,
+        stream: true,
       });
-      const choice = response.choices[0];
-      const rawToolCalls = choice.message.tool_calls || [];
+
+      let fullText = '';
+      const toolCallsMap = {};
+
+      for await (const chunk of stream) {
+        const choice = chunk.choices[0];
+        if (!choice) continue;
+        const delta = choice.delta;
+
+        if (delta.content) {
+          fullText += delta.content;
+        }
+
+        if (delta.tool_calls) {
+          for (const tc of delta.tool_calls) {
+            if (!toolCallsMap[tc.index]) {
+              toolCallsMap[tc.index] = { id: '', type: 'function', function: { name: '', arguments: '' } };
+            }
+            if (tc.id) toolCallsMap[tc.index].id = tc.id;
+            if (tc.function?.name) toolCallsMap[tc.index].function.name += tc.function.name;
+            if (tc.function?.arguments) toolCallsMap[tc.index].function.arguments += tc.function.arguments;
+          }
+        }
+      }
+
+      const rawToolCalls = Object.values(toolCallsMap);
       const toolCalls = rawToolCalls.map(tc => {
         let args;
         try { args = JSON.parse(tc.function.arguments); } catch { args = {}; }
         return { id: tc.id, name: tc.function.name, args };
       });
-      return { textContent: choice.message.content || '', toolCalls, rawAssistant: choice.message };
+
+      // 构造 rawAssistant 消息用于 message history
+      const rawAssistant = {
+        role: 'assistant',
+        content: fullText || null,
+        ...(rawToolCalls.length > 0 ? { tool_calls: rawToolCalls } : {})
+      };
+
+      return { textContent: fullText, toolCalls, rawAssistant };
     },
 
     pushAssistantMessage(messages, rawAssistant) {
@@ -244,12 +289,29 @@ async function runSubAgentLoop(agentType, task, provider, apiKey, model, sendSSE
     // 有工具调用 → 追加 assistant 消息，执行工具，追加结果
     adapter.pushAssistantMessage(messages, rawAssistant);
 
+    // ── 限制 search_flights 调用次数，防止失控搜索 ──
+    const MAX_FLIGHT_SEARCHES_PER_ROUND = 6;
+    let flightSearchCount = 0;
+    const cappedToolCalls = toolCalls.filter(tc => {
+      if (tc.name === 'search_flights') {
+        flightSearchCount++;
+        if (flightSearchCount > MAX_FLIGHT_SEARCHES_PER_ROUND) {
+          aLog.warn('search_flights 超限，已截断', { round: round + 1, dropped: tc.args });
+          return false;
+        }
+      }
+      return true;
+    });
+    if (flightSearchCount > MAX_FLIGHT_SEARCHES_PER_ROUND) {
+      aLog.info(`search_flights 截断: ${flightSearchCount} → ${MAX_FLIGHT_SEARCHES_PER_ROUND}`);
+    }
+
     // 并行执行同一轮的所有工具调用（web_search × N 等场景显著提速）
-    for (const tc of toolCalls) {
+    for (const tc of cappedToolCalls) {
       sendSSE('agent_tool', { agent: agentType, tool: tc.name, args: tc.args, status: 'running' });
     }
 
-    const toolSettled = await Promise.allSettled(toolCalls.map(async (tc) => {
+    const toolSettled = await Promise.allSettled(cappedToolCalls.map(async (tc) => {
       const toolTimer = aLog.startTimer(`sub_tool:${tc.name}`);
       const result = await getTools().executeToolCall(tc.name, tc.args);
       let resultStr = typeof result === 'string' ? result : JSON.stringify(result);
@@ -266,7 +328,7 @@ async function runSubAgentLoop(agentType, task, provider, apiKey, model, sendSSE
 
     const toolResults = toolSettled.map((r, i) => {
       if (r.status === 'fulfilled') return r.value;
-      const tc = toolCalls[i];
+      const tc = cappedToolCalls[i];
       aLog.error('子Agent工具执行失败', { tool: tc.name, error: r.reason?.message });
       const errStr = `工具执行失败: ${r.reason?.message || '未知错误'}`;
       sendSSE('agent_tool_done', { agent: agentType, tool: tc.name, args: tc.args, label: '执行失败' });
@@ -274,10 +336,36 @@ async function runSubAgentLoop(agentType, task, provider, apiKey, model, sendSSE
     });
 
     adapter.pushToolResults(messages, toolResults);
+
+    // 为被截断的 tool_calls 补充占位结果（保持 assistant.tool_calls ↔ tool 消息对齐）
+    if (cappedToolCalls.length < toolCalls.length) {
+      const droppedResults = toolCalls.slice(cappedToolCalls.length).map(tc => ({
+        id: tc.id,
+        content: '⚠️ 已达本轮搜索次数上限，本次调用被跳过。请基于已有结果生成回复。'
+      }));
+      adapter.pushToolResults(messages, droppedResults);
+    }
   }
 
-  // 达到最大轮次仍有工具调用，返回最后一轮的文本
-  return messages[messages.length - 1]?.content || '';
+  // 达到最大轮次仍有工具调用 — 追加一轮不带工具的调用让 LLM 汇总所有结果
+  aLog.info('子Agent轮次已满，请求最终汇总');
+  try {
+    const { textContent: summary } = await adapter.complete(selectedModel, system, messages, [], config.maxTokens);
+    if (summary && summary.trim()) {
+      return summary;
+    }
+  } catch (err) {
+    aLog.warn('子Agent最终汇总调用失败', { error: err.message });
+  }
+
+  // 兜底：从 messages 中提取最后一条 assistant 文本
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role === 'assistant' && typeof msg.content === 'string' && msg.content.trim()) {
+      return msg.content;
+    }
+  }
+  return '';
 }
 
 /**
@@ -310,7 +398,17 @@ async function runSubAgent(agentType, task, provider, apiKey, model, sendSSE, ba
   });
 
   try {
-    const result = await runSubAgentLoop(agentType, task, provider, apiKey, model, sendSSE, baseUrl, agentLog);
+    let result = await runSubAgentLoop(agentType, task, provider, apiKey, model, sendSSE, baseUrl, agentLog);
+
+    // 清理子 Agent 输出中可能泄露的 DSML / <think> 等技术内容
+    if (result) {
+      result = result
+        .replace(/<think>[\s\S]*?(<\/think>|$)/g, '')
+        .replace(/<[｜|]?\s*DSML[\s\S]*?DSML\s*[｜|]?>/g, '')
+        .replace(/<\/?[｜|]?\s*DSML[｜|]?\s*(?:function_calls|invoke|parameter)[^>]*>/g, '')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+    }
 
     const memAfter = process.memoryUsage();
     agentTimer.done({

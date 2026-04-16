@@ -39,15 +39,40 @@ fi
 
 echo -e "${GREEN}✓ Node.js $(node -v) / npm $(npm -v)${NC}"
 
-# 安装依赖
+# 检查 Python3
+if ! command -v python3 &> /dev/null; then
+  echo -e "${YELLOW}⚠️  未检测到 Python3（机票/酒店搜索需要），请安装：https://www.python.org${NC}"
+else
+  echo -e "${GREEN}✓ Python $(python3 --version 2>&1 | awk '{print $2}')${NC}"
+fi
+
+# 安装 Node.js 依赖
 if [ ! -d "node_modules" ] || [ ! -f "node_modules/.package-lock.json" ]; then
   echo ""
-  echo "📦 正在安装依赖..."
+  echo "📦 正在安装 Node.js 依赖..."
   npm install --silent
-  echo -e "${GREEN}✓ 依赖安装完成${NC}"
+  echo -e "${GREEN}✓ Node.js 依赖安装完成${NC}"
 else
-  echo -e "${GREEN}✓ 依赖已安装${NC}"
+  echo -e "${GREEN}✓ Node.js 依赖已安装${NC}"
 fi
+
+# 安装 Python 依赖（机票搜索 + 酒店搜索）
+if command -v python3 &> /dev/null && command -v pip3 &> /dev/null; then
+  if ! python3 -c "import fast_flights" 2>/dev/null; then
+    echo "📦 正在安装 Python 依赖 (fast-flights)..."
+    pip3 install -q fast-flights 2>/dev/null && echo -e "${GREEN}✓ fast-flights 已安装${NC}" || echo -e "${YELLOW}⚠️  fast-flights 安装失败，机票搜索功能不可用${NC}"
+  else
+    echo -e "${GREEN}✓ fast-flights 已安装${NC}"
+  fi
+  if ! python3 -c "import playwright" 2>/dev/null; then
+    echo "📦 正在安装 Python 依赖 (playwright)..."
+    pip3 install -q playwright 2>/dev/null && python3 -m playwright install chromium 2>/dev/null && echo -e "${GREEN}✓ playwright 已安装${NC}" || echo -e "${YELLOW}⚠️  playwright 安装失败，酒店搜索功能不可用${NC}"
+  else
+    echo -e "${GREEN}✓ playwright 已安装${NC}"
+  fi
+fi
+
+PORT=3002
 
 PORT=${PORT:-3002}
 URL="http://localhost:$PORT"
@@ -56,11 +81,9 @@ URL="http://localhost:$PORT"
 if [ "$DEBUG_MODE" = true ]; then
   export LOG_STDOUT=true
   export LOG_LEVEL=DEBUG
-  echo -e "${YELLOW}🐛 调试模式：终端输出日志 (DEBUG 级别)${NC}"
+  echo -e "${YELLOW}🐛 调试模式：终端输出日志 + 保存到 logs/ 目录${NC}"
 else
-  export LOG_STDOUT=false
-  export LOG_LEVEL=INFO
-  echo -e "${GREEN}✓ 日志保存到 logs/ 目录（终端静默）${NC}"
+  echo -e "${GREEN}✓ 静默模式（使用 --debug 开启日志）${NC}"
 fi
 
 echo ""
@@ -80,10 +103,5 @@ echo ""
   fi
 ) &
 
-# 启动服务（限制堆内存避免被系统 OOM Kill，隐藏 punycode 废弃警告）
-NODE_OPTS="--max-old-space-size=1024 --no-deprecation"
-if [ -f ".env" ]; then
-  node $NODE_OPTS --env-file=.env server.js
-else
-  node $NODE_OPTS server.js
-fi
+# 启动服务
+node --max-old-space-size=1024 --no-deprecation server.js

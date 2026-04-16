@@ -51,25 +51,8 @@ function getHelmetConfig() {
  * Restrict to whitelisted origins
  */
 function getCorsConfig() {
-  // Get allowed origins from environment variable or use default
-  const allowedOrigins = process.env.CORS_ORIGINS
-    ? process.env.CORS_ORIGINS.split(',').map(origin => origin.trim())
-    : ['http://localhost:3000', 'http://localhost:3002'];
-
   return {
-    origin: function (origin, callback) {
-      // Allow requests with no origin (e.g., mobile apps, curl requests)
-      if (!origin) return callback(null, true);
-
-      if (allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else if (process.env.NODE_ENV === 'development') {
-        // In development, allow all origins
-        callback(null, true);
-      } else {
-        callback(new Error('Not allowed by CORS'));
-      }
-    },
+    origin: true, // 本地项目，允许所有来源
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'X-API-Key', 'X-Base-URL', 'X-Skip-Rate-Limit'],

@@ -31,21 +31,20 @@
       <div class="form-group">
         <label for="provider">AI 模型提供商</label>
         <select id="provider">
+          <option value="deepseek">DeepSeek</option>
           <option value="openai">OpenAI</option>
           <option value="anthropic">Anthropic (Claude)</option>
-          <option value="deepseek">DeepSeek</option>
+          <option value="kimi">Kimi (月之暗面)</option>
+          <option value="glm">GLM (智谱)</option>
+          <option value="minimax">MiniMax</option>
         </select>
       </div>
       <div class="form-group">
         <label for="model">模型</label>
         <select id="model">
-          <option value="gpt-4o">GPT-4o</option>
-          <option value="gpt-4o-mini">GPT-4o Mini</option>
-          <option value="claude-sonnet-4-20250514">Claude Sonnet 4</option>
-          <option value="claude-opus-4-20250514">Claude Opus 4</option>
-          <option value="deepseek-chat">DeepSeek V3</option>
-          <option value="deepseek-reasoner">DeepSeek R1</option>
+          <option value="deepseek-chat">DeepSeek V3 (推荐)</option>
         </select>
+        <small>推荐使用通用模型，避免选择推理模型（如 R1/o1），推理模型速度慢且不适合工具调用</small>
       </div>
       <div class="form-group">
         <label for="apiKey">API Key</label>
@@ -56,6 +55,12 @@
         <label for="baseUrl">自定义 Base URL（可选）</label>
         <input type="text" id="baseUrl" placeholder="留空使用默认地址">
         <small>如使用代理或第三方兼容 API</small>
+      </div>
+      <hr class="settings-divider">
+      <div class="form-group">
+        <label for="braveKey">Brave Search API Key</label>
+        <input type="password" id="braveKey" placeholder="BSA...">
+        <small>用于搜索引擎，<a href="https://brave.com/search/api/" target="_blank">免费申请</a></small>
       </div>
       <button onclick="saveSettings()" class="btn-primary">保存设置</button>
     </div>

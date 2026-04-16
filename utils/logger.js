@@ -38,8 +38,9 @@ const currentLevel = LEVELS[ENV_LEVEL] ?? LEVELS.INFO;
 // 是否输出 JSON 格式（生产环境推荐），默认 false 使用可读格式
 const JSON_FORMAT = process.env.LOG_JSON === 'true';
 
-// 是否输出到终端（由 LOG_STDOUT 环境变量控制，默认 true）
-const LOG_STDOUT = process.env.LOG_STDOUT !== 'false';
+// Debug 模式：仅当 LOG_STDOUT=true 时启用终端输出和文件写入
+// 默认关闭（静默模式），通过 ./start.sh --debug 开启
+const DEBUG_MODE = process.env.LOG_STDOUT === 'true';
 
 // ─── 日志文件 ───
 const LOG_DIR = path.join(process.cwd(), 'logs');
@@ -74,7 +75,10 @@ function cleanOldLogs() {
   } catch {}
 }
 
-initLogFiles();
+// 仅 debug 模式下初始化日志文件
+if (DEBUG_MODE) {
+  initLogFiles();
+}
 
 // ─── 颜色代码（终端可读格式用） ───
 const COLORS = {
@@ -122,6 +126,7 @@ function truncate(str, maxLen = 200) {
  * 核心日志输出
  */
 function writeLog(level, context, message, data) {
+  if (!DEBUG_MODE) return; // 非 debug 模式完全静默
   if (LEVELS[level] < currentLevel) return;
 
   const timestamp = new Date().toISOString();
@@ -152,21 +157,18 @@ function writeLog(level, context, message, data) {
 
   const timeStr = timestamp.slice(11, 23); // HH:MM:SS.mmm
 
-  // ── 写入日志文件（始终执行） ──
+  // ── 写入日志文件 ──
   const fileLine = `${timestamp} ${level.padEnd(5)} ${tagStr}${message}${dataStr}\n`;
   try {
     if (level === 'ERROR' && errFileStream) {
       errFileStream.write(fileLine);
     }
-    // 所有级别都写入 app 日志
     if (logFileStream) {
       logFileStream.write(fileLine);
     }
   } catch {}
 
-  // ── 写入终端（受 LOG_STDOUT 控制） ──
-  if (!LOG_STDOUT) return;
-
+  // ── 写入终端 ──
   if (JSON_FORMAT) {
     const entry = {
       ts: timestamp,

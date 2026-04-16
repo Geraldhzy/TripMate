@@ -19,7 +19,7 @@ const AGENT_CONFIGS = {
   flight: {
     tools: ['search_flights', 'web_search'],
     buildPrompt: flightPrompt.build,
-    maxRounds: 2,
+    maxRounds: 4,
     maxTokens: 4096,
     icon: '✈️',
     label: '机票搜索'
@@ -27,7 +27,7 @@ const AGENT_CONFIGS = {
   research: {
     tools: ['web_search'],
     buildPrompt: researchPrompt.build,
-    maxRounds: 1,
+    maxRounds: 2,
     maxTokens: 8192,
     icon: '📋',
     label: '目的地调研'
