@@ -1,6 +1,6 @@
-# 旅行 AI Agent · PRD v0.1
+# TripMate · PRD v0.1
 
-**产品名**：待定（暂称 TripMate）
+**产品名**：TripMate
 **载体**：iOS 原生 App
 **版本**：v0.1 概念稿
 **作者**：—

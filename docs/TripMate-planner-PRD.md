@@ -1,4 +1,4 @@
-# AI Travel Planner - 产品需求文档 (PRD)
+# TripMate Planner - 产品需求文档 (PRD)
 
 > 版本: 2.0 | 最后更新: 2026-04-16
 
